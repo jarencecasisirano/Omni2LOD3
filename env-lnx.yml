@@ -1,0 +1,32 @@
+name: lidar-test
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scipy
+  - scikit-image
+  - scikit-learn
+  - matplotlib
+  - open3d
+  - laspy
+  - rasterio
+  - pyproj
+  - geopandas
+  - affine
+  - folium
+  - shapely
+  - tqdm
+  - pip
+  - pip:
+      - alphashape
+      - trimesh
+      - progress
+      - autopep8
+      - black
+      - descartes
+      - flask
+      - plotly
+      - ipywidgets
+      - dash

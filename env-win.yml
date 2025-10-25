@@ -1,0 +1,20 @@
+name: las-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10  # Matches your original setup
+  - laspy=2.5.4  # Used in voxel_downsampling, classify_points, segment_planes
+  - numpy=1.26.4  # Used across all scripts
+  - open3d=0.19.0  # Used in voxel_downsampling, classify_points, segment_planes, classify_planes
+  - scikit-learn=1.7.0  # Used in voxel_downsampling, classify_points for KDTree and DBSCAN
+  - progress=1.6.1  # Used in voxel_downsampling, classify_points, segment_planes
+  - pip  # To allow pip installation if needed
+  - pdal  # Used in classify_points for point cloud processing
+  - pyproj  # Used in laspy for CRS parsing (assumed needed based on prior context)
+  - shapely  # Used in segment_planes for geometry operations
+  - matplotlib  # Used in classify_points, segment_planes for plotting
+  - scipy  # Used in classify_points for cKDTree
+  - pip:
+      # No additional pip packages needed beyond conda ones for these scripts
+prefix: C:\miniconda3\envs\las-env

@@ -23,11 +23,53 @@ INPUT_LAS = sys.argv[1]
 OUTPUT_LAS = sys.argv[2]
 VIS_OUTPUT_PNG = OUTPUT_LAS.replace(".las", "_vis.png")
 
-# STEP 1: PDAL for ground and noise classification
-print("STEP 1: Running PDAL for ground and noise classification...")
+# -----------------------------
+# STEP 1: PDAL for ground and noise classification (with laspy Z normalization)
+# -----------------------------
+print("STEP 1: Running PDAL for ground and noise classification (with Z normalization)...")
+
+# Create a normalized temporary LAS (only if needed)
+base_out_dir = os.path.dirname(OUTPUT_LAS)
+temp_norm_path = os.path.join(base_out_dir, os.path.basename(OUTPUT_LAS).replace(".las", "_znorm_temp.las"))
+use_temp = False
+
+try:
+    print(f"-> Reading input LAS to check Z range: {INPUT_LAS}")
+    las_in = laspy.read(INPUT_LAS)
+    z_min_before = float(np.min(las_in.z))
+    z_max_before = float(np.max(las_in.z))
+    print(f"   Z before normalization: min={z_min_before:.2f}, max={z_max_before:.2f}")
+
+    # Normalize in memory (shift so lowest Z == 0). Do it always to keep behavior consistent.
+    if True:
+        print("-> Normalizing Z (shifting so minimum Z -> 0) and writing temporary LAS for PDAL...")
+        las_in.z = las_in.z - z_min_before
+
+        # write the normalized temporary LAS
+        las_in.write(temp_norm_path)
+        use_temp = True
+
+        # report new range
+        las_check = laspy.read(temp_norm_path)
+        z_min_after = float(np.min(las_check.z))
+        z_max_after = float(np.max(las_check.z))
+        print(f"   Z after normalization: min={z_min_after:.2f}, max={z_max_after:.2f}")
+    else:
+        # if you ever want to skip normalization, set use_temp=False and use INPUT_LAS directly
+        use_temp = False
+
+except Exception as e:
+    print("[ERROR] Failed to normalize with laspy:", e)
+    # fallback: try to run PDAL on original file
+    use_temp = False
+
+# Choose which input to pass to PDAL
+pdal_input = temp_norm_path if use_temp else INPUT_LAS
+
+# Build PDAL pipeline (run on pdal_input)
 pipeline_json = {
     "pipeline": [
-        INPUT_LAS,
+        pdal_input,
         {
             "type": "filters.assign",
             "value": "Classification = 0"
@@ -64,9 +106,29 @@ pipeline_json = {
         }
     ]
 }
-pipeline = pdal.Pipeline(json.dumps(pipeline_json))
-pipeline.execute()
-print("-> Ground and noise classification complete and written to LAS.")
+
+try:
+    pipeline = pdal.Pipeline(json.dumps(pipeline_json))
+    pipeline.execute()
+    print("-> Ground and noise classification complete and written to LAS.")
+except Exception as e:
+    print("[ERROR] PDAL pipeline failed:", e)
+    # Clean up temp file if it exists, then re-raise so caller sees failure
+    if use_temp and os.path.exists(temp_norm_path):
+        try:
+            os.remove(temp_norm_path)
+        except Exception:
+            pass
+    raise
+
+# remove temporary normalized file (we no longer need it)
+if use_temp and os.path.exists(temp_norm_path):
+    try:
+        os.remove(temp_norm_path)
+        print(f"-> Removed temporary normalized LAS: {temp_norm_path}")
+    except Exception as e:
+        print(f"[WARNING] Could not delete temp file {temp_norm_path}: {e}")
+
 
 # STEP 2: Load LAS file
 print("STEP 2: Loading LAS file...")

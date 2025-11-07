@@ -5,66 +5,44 @@ def print_las_info(file_path):
     try:
         with laspy.open(file_path) as las_file:
             header = las_file.header
-            points = las_file.read()
+            las = las_file.read()
 
-            # Basic header information
-            print("LAS File Information:")
-            print(f"- File Version: {header.version}")
-            print(f"- Point Format: {header.point_format.id}")
-            print(f"- Point Count: {header.point_count}")
-            print(f"- Scale Factors: {header.scales}")
-            print(f"- Offsets: {header.offsets}")
+            print("LAS File Summary")
+            print("=" * 50)
+
+            # Version & Point Format
+            print(f"Version        : {header.version}")
+            print(f"Point Format   : {header.point_format.id}")
+            print(f"Point Count    : {header.point_count:,}")
+
+            # Scale & Offset
+            print(f"Scale (X,Y,Z)  : {header.scales}")
+            print(f"Offset (X,Y,Z) : {header.offsets}")
 
             # Bounds
-            bounds = header.mins, header.maxs
-            print(f"- Bounds (min, max): {bounds}")
+            print(f"X Range        : {header.mins[0]:.3f} → {header.maxs[0]:.3f}")
+            print(f"Y Range        : {header.mins[1]:.3f} → {header.maxs[1]:.3f}")
+            print(f"Z Range        : {header.mins[2]:.3f} → {header.maxs[2]:.3f}")
 
-            # CRS (Coordinate Reference System)
-            if header.parse_crs() is not None:
-                crs = header.parse_crs()
-                print(f"- CRS: {crs.name if crs else 'Not specified or unparseable'}")
-                print(f"- CRS WKT: {crs.to_wkt() if crs else 'Not available'}")
-            else:
-                print("- CRS: Not found or not parseable")
-
-            # Classification information
-            if "classification" in points.point_format.dimension_names:
-                classifications = points.classification
-                if classifications is not None and len(classifications) > 0:
-                    unique_classes = np.unique(classifications)
-                    class_counts = dict(zip(unique_classes, [np.sum(classifications == c) for c in unique_classes]))
-                    print("- Classifications Present:")
-                    for class_id, count in class_counts.items():
-                        print(f"  - Class {int(class_id)}: {count} points")
-                    # Common LAS classification codes for reference
-                    print("\n- Common LAS Classification Codes:")
-                    print("  - 0: Never Classified")
-                    print("  - 1: Unclassified")
-                    print("  - 2: Ground")
-                    print("  - 6: Building")
-                    print("  - 9: Water")
-                    print("  - 12: Overlap")
+            # CRS
+            crs = header.parse_crs()
+            if crs:
+                print(f"CRS            : {crs.name}")
+                wkt = crs.to_wkt(pretty=True)
+                if len(wkt) > 200:
+                    print(f"CRS WKT        : (long WKT string, {len(wkt)} chars)")
                 else:
-                    print("- Classifications: No valid classification data found")
+                    print(f"CRS WKT        : {wkt}")
             else:
-                print("- Classifications: Not available in point format")
+                print("CRS            : Not specified")
 
-            # Additional dimensions
-            available_dims = points.point_format.dimension_names
-            print(f"- Available Dimensions: {available_dims}")
-
-            # Global Encoding
-            global_encoding = header.global_encoding
-            encoding_bits = []
-            if global_encoding.wkt:
-                encoding_bits.append("WKT")
-            if global_encoding.geocentric:
-                encoding_bits.append("Geocentric")
-            print(f"- Global Encoding Flags: {', '.join(encoding_bits) if encoding_bits else 'None'}")
+            # Available dimensions (just names)
+            dims = list(las.point_format.dimension_names)
+            print(f"Dimensions     : {', '.join(dims)}")
 
     except Exception as e:
         print(f"Error reading LAS file: {e}")
 
 if __name__ == "__main__":
-    file_path = input("Enter the full path to your LAS file: ")
+    file_path = input("Enter the full path to your LAS file: ").strip().strip('"')
     print_las_info(file_path)

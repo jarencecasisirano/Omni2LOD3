@@ -1,25 +1,31 @@
-import os
-import subprocess
-import glob
+import os, subprocess, glob
 
-# Define paths (update to your actual paths)
-DATA_DIR = os.path.abspath("D:/Projects/Thesis/data")
-DOWNSAMPLED_DIR = os.path.abspath("D:/Projects/Thesis/outputs/downsampled")
-GROUND_CLASSIFIED_DIR = os.path.abspath("D:/Projects/Thesis/outputs/ground_classification")
-BUILDING_CLASSIFIED_DIR = os.path.abspath("D:/Projects/Thesis/outputs/building_classification")
-SEGMENTED_PLANES_DIR = os.path.abspath("D:/Projects/Thesis/outputs/segmentation")
-FOOTPRINT_DIR = os.path.abspath("D:/Projects/Thesis/outputs/footprint")
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR      = os.path.join(BASE_DIR, "..", "data")
+CLIPPED_DIR   = os.path.join(BASE_DIR, "..", "outputs", "clipped")
+DOWNSAMPLED_DIR = os.path.join(BASE_DIR, "..", "outputs", "downsampled")
+GROUND_CLASSIFIED_DIR = os.path.join(BASE_DIR, "..", "outputs", "ground_classification")
+BUILDING_CLASSIFIED_DIR = os.path.join(BASE_DIR, "..", "outputs", "building_classification")
+SEGMENTED_PLANES_DIR = os.path.join(BASE_DIR, "..", "outputs", "segmentation")
+FOOTPRINT_DIR = os.path.join(BASE_DIR, "..", "outputs", "footprint")
 
-# Make sure output folders exist
-os.makedirs(DOWNSAMPLED_DIR, exist_ok=True)
-os.makedirs(GROUND_CLASSIFIED_DIR, exist_ok=True)
-os.makedirs(BUILDING_CLASSIFIED_DIR, exist_ok=True)
-os.makedirs(SEGMENTED_PLANES_DIR, exist_ok=True)
-os.makedirs(FOOTPRINT_DIR, exist_ok=True)
+for d in (DOWNSAMPLED_DIR, GROUND_CLASSIFIED_DIR, BUILDING_CLASSIFIED_DIR,
+          SEGMENTED_PLANES_DIR, FOOTPRINT_DIR):
+    os.makedirs(d, exist_ok=True)
+
+# ------------------------------------------------------------------
+#  ONE list that mixes raw + clipped for down-sample picker
+# ------------------------------------------------------------------
+_downsample_candidates = []
+for folder in (DATA_DIR, CLIPPED_DIR):
+    _downsample_candidates.extend(
+        sorted(glob.glob(os.path.join(folder, "*.las"))) +
+        sorted(glob.glob(os.path.join(folder, "*.laz")))
+    )
 
 # Menu options and associated scripts
 MENU_OPTIONS = [
-    ("VOXELDOWNSAMPLE", "voxel_downsampling.py", "Select raw LAS input for voxel_downsampling.py", DATA_DIR),
+    ("VOXELDOWNSAMPLE", "voxel_downsampling.py","Select raw/clipped LAS input for voxel_downsampling.py", _downsample_candidates),
     ("GROUND CLASSIFICATION", "classify_points.py", "Select downsampled LAS input for ground classification (edited classify_points.py)", DOWNSAMPLED_DIR),
     ("CLUSTER UNCLASSIFIED", "dbscan.py", "Select ground-classified LAS input for DBSCAN clustering", GROUND_CLASSIFIED_DIR),
     ("PLANE SEGMENTATION", "segment_planes.py", "Select building-classified LAS input for segment_planes.py", BUILDING_CLASSIFIED_DIR),
@@ -71,9 +77,27 @@ def generate_output_path(script, input_path):
 def run_selected_step(option_index):
     label, script, prompt, folder = MENU_OPTIONS[option_index]
     if script == "voxel_downsampling.py":
-        input_file = choose_file_from_folder(folder, prompt, extensions=[".las", ".laz"])
-        if not input_file:
+        # ----------------------------------------------------------
+        # build the same combined list on the fly
+        # ----------------------------------------------------------
+        candidates = []
+        for d in (DATA_DIR, CLIPPED_DIR):
+            candidates.extend(glob.glob(os.path.join(d, "*.las")))
+            candidates.extend(glob.glob(os.path.join(d, "*.laz")))
+        candidates = sorted(candidates)
+        if not candidates:
+            print("[ERROR] No LAS/LAZ found in data/ or outputs/clipped/")
             return False
+        print(f"\n{prompt}:")
+        for idx, path in enumerate(candidates):
+            print(f"[{idx}] {os.path.basename(path)}")
+        try:
+            choice = int(input("Enter index of file: ").strip())
+            input_file = candidates[choice]
+        except (ValueError, IndexError):
+            print("[ERROR] Invalid selection")
+            return False
+
         voxel_size = input("Enter voxel size (e.g., 0.2): ").strip()
         try:
             float(voxel_size)

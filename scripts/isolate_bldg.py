@@ -4,9 +4,9 @@ import json
 import os
 
 # Paths
-INPUT_LAS = r"D:\Projects\Thesis\outputs\downsampled\MBB_Roof_downsampled_0_5.las"
-GEOJSON_PATH = r"D:\Projects\Thesis\data\bounding_box_roof2.geojson"
-OUTPUT_LAS = r"D:\Projects\Thesis\outputs\building_classification\mbb_roof2.las"
+INPUT_LAS = r"D:\Projects\Thesis\outputs\ground_classification\NIMBB 111725_group1_densified_point_cloud_downsampled_0_2_ground_classified.las"
+GEOJSON_PATH = r"D:\Projects\Thesis\data\bounding_box\NIMBB_bounding_box1.geojson"
+OUTPUT_LAS = r"D:\Projects\Thesis\outputs\building_classification\NIMBB 111725_02.las"
 
 # Ensure output directory exists
 OUTPUT_DIR = os.path.dirname(OUTPUT_LAS)

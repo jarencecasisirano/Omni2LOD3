@@ -44,29 +44,43 @@ max_z   = float(xyz_r[:, 2].max())
 min_z   = float(xyz_r[:, 2].min())
 spacing = 0.5          # 50 cm grid
 
-# ----------  generate facade grid INSIDE polygon ----------
+# ----------  pure-Numpy height grid (25 cm) ----------
+from shapely import contains_xy
+
+res        = 0.25
 xmin, ymin, xmax, ymax = poly.bounds
-x_grid = np.arange(xmin, xmax + spacing, spacing)
-y_grid = np.arange(ymin, ymax + spacing, spacing)
-xx, yy = np.meshgrid(x_grid, y_grid)
-grid_xy = np.column_stack((xx.ravel(), yy.ravel()))
+x_edge     = np.arange(xmin, xmax + res, res)
+y_edge     = np.arange(ymin, ymax + res, res)
+x_centres  = x_edge[:-1] + res / 2          # pixel centres
+y_centres  = y_edge[:-1] + res / 2
+xx, yy     = np.meshgrid(x_centres, y_centres)
+grid_xy    = np.column_stack((xx.ravel(), yy.ravel()))
 
-# keep only points inside polygon
-inside_mask = contains_xy(poly, grid_xy[:, 0], grid_xy[:, 1])
-grid_xy = grid_xy[inside_mask]
+# burn max-Z per pixel
+height_grid = np.full(grid_xy.shape[0], np.nan, dtype=np.float32)
+for x, y, z in zip(xyz_r[:, 0], xyz_r[:, 1], xyz_r[:, 2]):
+    # find nearest pixel
+    c = int((x - xmin) / res); r = int((y - ymin) / res)
+    if 0 <= c < len(x_centres) and 0 <= r < len(y_centres):
+        idx = r * len(x_centres) + c
+        height_grid[idx] = np.nanmax([height_grid[idx], z])
 
-# vertical sampling every 50 cm from ground to roof top
-z_vals = np.arange(min_z, max_z + spacing, spacing)
-n_facade = len(grid_xy) * len(z_vals)
-facade_xyz = np.empty((n_facade, 3))
-facade_rgb = np.full((n_facade, 3), 65535, dtype=np.uint16)  # white-ish
-facade_cls = np.full(n_facade, 6, dtype=np.uint8)            # building class
+height_grid = np.nan_to_num(height_grid, nan=min_z)   # fill empty pixels
 
-idx = 0
-for x, y in grid_xy:
+# ----------  variable-height façade ----------
+facade_xyz, facade_rgb, facade_cls = [], [], []
+for (x, y), z_top in zip(grid_xy, height_grid):
+    if not contains_xy(poly, x, y):
+        continue
+    z_vals = np.arange(min_z, z_top + res, res)
     for z in z_vals:
-        facade_xyz[idx] = [x, y, z]
-        idx += 1
+        facade_xyz.append([x, y, z])
+        facade_rgb.append([65000, 65000, 65000])
+        facade_cls.append(6)
+
+facade_xyz = np.array(facade_xyz, dtype=np.float64)
+facade_rgb = np.array(facade_rgb, dtype=np.uint16)
+facade_cls = np.array(facade_cls, dtype=np.uint8)
 
 # ----------  merge roof + facade ----------
 all_xyz = np.vstack((xyz_r, facade_xyz))

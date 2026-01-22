@@ -1,74 +1,64 @@
-#!/usr/bin/env python3
-import sys, os, uuid
 import laspy, numpy as np, open3d as o3d
 from sklearn.cluster import DBSCAN
-import alphashape
-import geopandas as gpd
+import alphashape, geopandas as gpd
 from shapely.geometry import Polygon
+import matplotlib.cm as cm
 
-def main(input_las, output_shp, alpha=0.0, eps=1.0, min_samples=10):
-    # ----------  your ORIGINAL code  ----------
+def main(input_las, output_geojson, eps=1.0, min_samples=20, alpha=0.5):
+
     las = laspy.read(input_las)
-    building_mask = las.classification == 6
-    if np.sum(building_mask) == 0:
-        print("No building points found (class 6)."); sys.exit(1)
+    mask = las.classification == 6
+    xyz = np.vstack((las.x[mask], las.y[mask], las.z[mask])).T
+    xy = xyz[:, :2]
 
-    xyz = np.vstack((las.x[building_mask], las.y[building_mask], las.z[building_mask])).T
-    xy  = xyz[:, :2]; min_z, max_z = xyz[:, 2].min(), xyz[:, 2].max()
-
-    db = DBSCAN(eps=eps, min_samples=int(min_samples)).fit(xy)
+    # --- cluster ---
+    db = DBSCAN(eps=eps, min_samples=min_samples).fit(xy)
     labels = db.labels_
-    largest = max(set(labels[labels >= 0]), key=labels.tolist().count, default=None)
-    if largest is None: print("No valid cluster."); sys.exit(1)
-    clean_xy = xy[labels == largest]
-    if len(clean_xy) < 3: print("Insufficient points."); sys.exit(1)
 
-    # ORIGINAL HULL BLOCK (unchanged)
-    hull = alphashape.alphashape(clean_xy, alpha=0.5)
-    if isinstance(hull, Polygon):
-        hull = Polygon(hull.exterior)
-        hull = hull.simplify(0.25, preserve_topology=True)
-    else: print("Hull is not a single Polygon."); sys.exit(1)
+    valid_labels = sorted(set(labels) - {-1})
+    if not valid_labels:
+        raise RuntimeError("No building clusters found")
 
-    # ----------  POST-CLEAN (new)  ----------
-    # 1. keep only exterior ring   (already done above, but repeat for safety)
-    clean_poly = Polygon(hull.exterior)
-    # 2. smooth & down-sample vertices (5 cm tolerance)
-    clean_poly = clean_poly.simplify(0.05, preserve_topology=True)
-    # 3. optional micro-spike snap
-    clean_poly = clean_poly.buffer(0.01).buffer(-0.01)
-    # use the cleaned polygon from here on
-    hull = clean_poly
+    print("Detected clusters:")
+    for lbl in valid_labels:
+        print(f"  Cluster {lbl}: {(labels == lbl).sum()} points")
 
-    # ----------  save (your original logic)  ----------
-    counter = 0; base, ext = os.path.splitext(output_shp)
-    while os.path.exists(f"{base}_{counter}{ext}"): counter += 1
-    final_path = f"{base}_{counter}{ext}"
-    gdf = gpd.GeoDataFrame(geometry=[hull], crs="EPSG:32651")
-    gdf.to_file(final_path, driver='GeoJSON')
-    print(f"Footprint saved to: {final_path}")
+    # --- visualize clusters ---
+    cmap = cm.get_cmap("tab20", len(valid_labels))
+    colors = np.zeros((len(xy), 3))
+    for i, lbl in enumerate(valid_labels):
+        colors[labels == lbl] = cmap(i)[:3]
 
-    # ----------  visualise (your original)  ----------
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(xyz)
-    pcd.colors = o3d.utility.Vector3dVector(np.tile([1, 0, 0], (len(xyz), 1)))
-    hull_coords = np.array(hull.exterior.coords)[:-1]
-    z_base = min_z - 0.5; z_top = z_base + 1.0
-    pts_3d, lines = [], []
-    for i, (x, y) in enumerate(hull_coords):
-        pts_3d.append([x, y, z_base]); pts_3d.append([x, y, z_top])
-        lines.append([2*i, 2*i+1])
-        lines.append([2*i, 2*(i+1)%len(hull_coords)])
-        lines.append([2*i+1, 2*(i+1)%len(hull_coords)+1])
-    line_set = o3d.geometry.LineSet()
-    line_set.points = o3d.utility.Vector3dVector(pts_3d)
-    line_set.lines  = o3d.utility.Vector2iVector(lines)
-    line_set.colors = o3d.utility.Vector3dVector(np.tile([1, 1, 0], (len(lines), 1)))
-    print("Visualising… (close window to continue)")
-    o3d.visualization.draw_geometries([pcd, line_set], window_name="Building & Footprint")
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    print("Close window, then select cluster ID in terminal")
+    o3d.visualization.draw_geometries([pcd])
+
+    # --- user selects cluster ---
+    chosen = int(input(f"Select cluster ID {valid_labels}: "))
+    if chosen not in valid_labels:
+        raise ValueError("Invalid cluster ID")
+
+    clean_xy = xy[labels == chosen]
+
+    # --- footprint ---
+    hull = alphashape.alphashape(clean_xy, alpha)
+    if not isinstance(hull, Polygon):
+        raise RuntimeError("Alpha shape did not return polygon")
+
+    hull = hull.simplify(0.1, preserve_topology=True)
+
+    gdf = gpd.GeoDataFrame(geometry=[hull], crs="EPSG:32651")
+    gdf.to_file(output_geojson, driver="GeoJSON")
+
+    print(f"Footprint written: {output_geojson}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python generate_footprint.py <input.las> <output.shp> [alpha] [eps] [min_samples]")
-        sys.exit(1)
-    main(*sys.argv[1:6])
+    main(
+        r"C:\Projects\Thesis\outputs\normalized\nimmb_hag.las",
+        r"C:\Projects\Thesis\outputs\footprint\nimmb_auto.geojson",
+        eps=1.0,
+        alpha=0.5
+    )

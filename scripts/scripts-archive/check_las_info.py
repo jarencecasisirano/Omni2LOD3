@@ -62,6 +62,23 @@ def print_las_info(path: str) -> None:
             print("\n" + "=" * 50)
             print(f"🏢 BUILDING POINTS (Class 6): {building_count:,}")
             print("=" * 50)
+
+            # Enhanced check_las_info.py snippet
+            print("\n=== CITYFORGE READINESS CHECK ===")
+            ground = las[las.classification == 2]
+            buildings = las[las.classification == 6]
+
+            if len(ground) > 0 and len(buildings) > 0:
+                clearance = buildings.z.min() - ground.z.max()
+                print(f"✓ Vertical clearance: {clearance:.2f}m (need >3m)")
+                print(f"✓ Ground Z-range: {ground.z.min():.2f} to {ground.z.max():.2f}m")
+                print(f"✓ Building Z-range: {buildings.z.min():.2f} to {buildings.z.max():.2f}m")
+            else:
+                print("✗ Missing ground or building class!")
+
+            density = len(buildings) / ((las.header.x_max - las.header.x_min) * 
+                                        (las.header.y_max - las.header.y_min))
+            print(f"✓ Building density: {density:.1f} pts/m² (aim 5-8)")
             
     except Exception as e:
         print("Error:", e)

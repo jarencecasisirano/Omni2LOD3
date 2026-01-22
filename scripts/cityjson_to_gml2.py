@@ -4,14 +4,17 @@
 import subprocess
 from pathlib import Path
 
-DATA_FOLDER = Path(r"D:\Projects\Thesis\data")
-CITYGML_TOOLS_BAT = Path(r"D:\Projects\Thesis\tools\citygml-tools-2.4.0\citygml-tools-2.4.0\citygml-tools.bat")
+DATA_FOLDER = Path(r"C:\Projects\Thesis\data")
+OUTPUT_FOLDER = Path(r"C:\Projects\Thesis\outputs\LOD2_gml")
+CITYGML_TOOLS_BAT = Path(r"C:\Projects\Thesis\tools\citygml-tools-2.4.0\citygml-tools-2.4.0\citygml-tools.bat")
 
 def list_json_files():
     return sorted([p for p in DATA_FOLDER.iterdir() if p.suffix.lower() == ".json"])
 
 def convert_to_citygml2(json_path: Path):
-    output_gml = DATA_FOLDER / f"{json_path.stem}_v2.gml"
+    OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    output_gml = OUTPUT_FOLDER / f"{json_path.stem}_v2.gml"
 
     print(f"\nConverting to CityGML 2.0:")
     print(f"   {json_path.name}")
@@ -21,15 +24,14 @@ def convert_to_citygml2(json_path: Path):
         str(CITYGML_TOOLS_BAT),
         "from-cityjson",
         str(json_path),
-        "-v", "2.0",           # THIS IS THE CORRECT FLAG
+        "-v", "2.0",
         "-o", str(output_gml)
     ]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print("SUCCESS! CityGML 2.0 saved:")
+        print("\nSUCCESS! CityGML 2.0 saved:")
         print(f"   {output_gml}")
-        print("\nSEND THIS TO YOUR PARTNER. DONE.")
     except subprocess.CalledProcessError as e:
         print("ERROR:")
         print(e.stderr)

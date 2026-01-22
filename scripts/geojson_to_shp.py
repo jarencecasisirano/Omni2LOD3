@@ -4,14 +4,14 @@ import geopandas as gpd
 
 # ----------  folders ----------
 ROOT      = os.path.join(os.path.dirname(__file__), "..")
-FOOT_DIR  = os.path.join(ROOT, "outputs", "footprint")
+FOOT_DIR  = os.path.join(ROOT, "outputs", "clean_footprint")
 OUT_DIR   = os.path.join(FOOT_DIR, "shp")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ----------  build file list ----------
 files = sorted(glob.glob(os.path.join(FOOT_DIR, "*.geojson")))
 if not files:
-    print("[ERROR] No GeoJSON files found in outputs/footprint/")
+    print("[ERROR] No GeoJSON files found in outputs/clean_footprint/")
     sys.exit(1)
 
 print("Select GeoJSON file to convert to Shapefile:")

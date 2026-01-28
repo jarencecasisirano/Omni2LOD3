@@ -4,7 +4,7 @@
 import subprocess
 from pathlib import Path
 
-DATA_FOLDER = Path(r"C:\Projects\Thesis\data")
+DATA_FOLDER = Path(r"C:\Projects\Thesis\outputs\LOD2_json")
 OUTPUT_FOLDER = Path(r"C:\Projects\Thesis\outputs\LOD2_gml")
 CITYGML_TOOLS_BAT = Path(r"C:\Projects\Thesis\tools\citygml-tools-2.4.0\citygml-tools-2.4.0\citygml-tools.bat")
 

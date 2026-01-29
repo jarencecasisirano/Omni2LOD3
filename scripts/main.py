@@ -80,14 +80,16 @@ def step_downsample():
         return None
 
     base = os.path.splitext(os.path.basename(input_las))[0]
-    output_las = os.path.join(OUT_DOWNSAMPLED, f"{base}_downsampled.las")
-
     voxel = input("Enter voxel size (e.g., 0.2): ").strip()
     try:
-        float(voxel)
+        voxel_float = float(voxel)
     except ValueError:
         print("[ERROR] Invalid voxel size.")
         return None
+
+    # Format voxel size for filename (0.5 -> 05, 0.2 -> 02, etc.)
+    voxel_str = str(voxel_float).replace(".", "")
+    output_las = os.path.join(OUT_DOWNSAMPLED, f"{base}_{voxel_str}_downsampled.las")
 
     print("\n=== Running voxel downsampling ===")
     print(f"Input:  {input_las}")

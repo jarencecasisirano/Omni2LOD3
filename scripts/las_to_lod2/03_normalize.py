@@ -1,48 +1,76 @@
-# normalize_height.py
-# Height normalization using PDAL (NO external JSON)
+#!/usr/bin/env python3
+"""
+03_normalize.py
+Height normalization using PDAL (HAG via Delaunay)
+Converts Z to HeightAboveGround (normalized heights)
+"""
 
+import sys
+import os
 import subprocess
 from pathlib import Path
+import time
 
-def normalize_hag(input_las: Path, output_las: Path):
-    print(f"\nNormalizing height:")
-    print(f"  {input_las.name} → {output_las.name}")
+start_time = time.time()
 
-    pipeline = r"""
+# ------------------------------------------------------------------
+# 1. Arguments (supplied by main.py)
+# ------------------------------------------------------------------
+if len(sys.argv) < 3:
+    print("Usage: python 03_normalize.py <input_las> <output_las>")
+    sys.exit(1)
+
+INPUT_LAS  = Path(sys.argv[1])
+OUTPUT_LAS = Path(sys.argv[2])
+
+# ------------------------------------------------------------------
+# 2. Ensure output folder exists
+# ------------------------------------------------------------------
+os.makedirs(OUTPUT_LAS.parent, exist_ok=True)
+
+# ------------------------------------------------------------------
+# 3. Run PDAL HAG normalization
+# ------------------------------------------------------------------
+print("\n=== Running height normalization (HAG) ===")
+print(f"Input:  {INPUT_LAS}")
+print(f"Output: {OUTPUT_LAS}")
+
+pipeline = r"""
+{
+  "pipeline": [
+    { "type": "readers.las" },
+    { "type": "filters.hag_delaunay" },
     {
-      "pipeline": [
-        { "type": "readers.las" },
-        { "type": "filters.hag_delaunay" },
-        {
-          "type": "filters.ferry",
-          "dimensions": "HeightAboveGround=>Z"
-        },
-        {
-          "type": "writers.las",
-          "extra_dims": "all"
-        }
-      ]
+      "type": "filters.ferry",
+      "dimensions": "HeightAboveGround=>Z"
+    },
+    {
+      "type": "writers.las",
+      "extra_dims": "all"
     }
-    """
+  ]
+}
+"""
 
-    cmd = [
-        "pdal", "pipeline",
-        "--stdin",
-        "--readers.las.filename=" + str(input_las),
-        "--writers.las.filename=" + str(output_las)
-    ]
+cmd = [
+    "pdal", "pipeline",
+    "--stdin",
+    "--readers.las.filename=" + str(INPUT_LAS),
+    "--writers.las.filename=" + str(OUTPUT_LAS)
+]
 
+try:
     subprocess.run(
         cmd,
         input=pipeline,
         text=True,
         check=True
     )
+except subprocess.CalledProcessError as e:
+    print("[ERROR] PDAL normalization failed.")
+    sys.exit(1)
 
-    print("✔ Height normalization complete")
+print("✔ Height normalization complete")
 
-if __name__ == "__main__":
-    normalize_hag(
-        Path(r"C:\Projects\Thesis\outputs\clipped\nimmb_zclean.las"),
-        Path(r"C:\Projects\Thesis\outputs\normalized\nimmb_hag.las")
-    )
+end_time = time.time()
+print(f"=== Done! Normalization finished in {end_time - start_time:.2f} seconds ===")

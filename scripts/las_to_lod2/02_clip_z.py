@@ -27,18 +27,10 @@ Z_MAX = float(sys.argv[4]) if len(sys.argv) >= 5 else 200
 os.makedirs(os.path.dirname(OUTPUT_LAS), exist_ok=True)
 
 # ------------------------------------------------------------------
-# 3. Load LAS
+# 3. Load and clip LAS
 # ------------------------------------------------------------------
-print(f"-> Loading LAS: {INPUT_LAS}")
+print(f"-> Reading: {INPUT_LAS}")
 las = laspy.read(INPUT_LAS)
-
-print(f"Input LAS Version: {las.header.version}")
-print(f"Input LAS Point Format: {las.header.point_format.id}")
-
-try:
-    print(f"Input CRS: {las.header.parse_crs()}")
-except Exception:
-    print("Input CRS: None / could not parse")
 
 z = las.z
 mask = (z >= Z_MIN) & (z <= Z_MAX)
@@ -46,56 +38,28 @@ mask = (z >= Z_MIN) & (z <= Z_MAX)
 print(f"Z min threshold: {Z_MIN}")
 print(f"Z max threshold: {Z_MAX}")
 print(f"Original points: {len(z):,}")
-print(f"Kept points:     {np.sum(mask):,}")
-print(f"Removed points:  {len(z) - np.sum(mask):,}")
+print(f"Kept points: {np.sum(mask):,}")
+print(f"Removed points: {len(z) - np.sum(mask):,}")
 
 # ------------------------------------------------------------------
-# 4. Create new LAS header (laspy 2.x safe)
+# 4. Create clipped LAS (preserve format and header)
 # ------------------------------------------------------------------
-print("-> Creating clipped LAS header...")
-
-header = laspy.LasHeader(
+clipped_las = laspy.create(
     point_format=las.header.point_format,
-    version=las.header.version
+    file_version=las.header.version
 )
 
-# Copy scales + offsets
-header.scales = las.header.scales
-header.offsets = las.header.offsets
-
-# Copy CRS safely
-try:
-    header.parse_crs(las.header.parse_crs())
-except Exception:
-    pass
-
-# ------------------------------------------------------------------
-# 5. Create output LAS + copy all dimensions
-# ------------------------------------------------------------------
-print("-> Writing clipped LAS...")
-
-clipped_las = laspy.LasData(header)
+clipped_las.header = las.header
 
 for dim in las.point_format.dimension_names:
-    data = getattr(las, dim)
-    setattr(clipped_las, dim, data[mask])
-
-# Update bounds
-clipped_las.header.mins = np.array([
-    clipped_las.x.min(),
-    clipped_las.y.min(),
-    clipped_las.z.min()
-])
-
-clipped_las.header.maxs = np.array([
-    clipped_las.x.max(),
-    clipped_las.y.max(),
-    clipped_las.z.max()
-])
+    setattr(
+        clipped_las,
+        dim,
+        getattr(las, dim)[mask]
+    )
 
 clipped_las.write(OUTPUT_LAS)
-
-print(f"-> Clipped LAS saved to: {OUTPUT_LAS}")
+print(f"-> Saved: {OUTPUT_LAS}")
 
 end_time = time.time()
 print(f"=== Done! Z clipping finished in {end_time - start_time:.2f} seconds ===")

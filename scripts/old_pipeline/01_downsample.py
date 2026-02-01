@@ -1,69 +1,49 @@
 #!/usr/bin/env python3
-import sys
-import os
-import time
-import numpy as np
-import laspy
-import open3d as o3d
+import sys, os, laspy, numpy as np, open3d as o3d
 from sklearn.neighbors import KDTree
-
-# ============================================================
-# Path setup for utils
-# ============================================================
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-sys.path.append(PROJECT_ROOT)
-
-from utils.loading import create_bar
+from progress.bar import ChargingBar
+import time
 
 start_time = time.time()
 
 # ------------------------------------------------------------------
-# 1. Arguments (supplied by main.py)
+# 1.  Hardcoded paths
 # ------------------------------------------------------------------
-if len(sys.argv) < 4:
-    print("Usage: python 01_downsampling.py <input_las> <output_las> <voxel_size>")
-    sys.exit(1)
-
-INPUT_LAS  = sys.argv[1]
-OUTPUT_LAS = sys.argv[2]
-VOXEL_SIZE = float(sys.argv[3])
+INPUT_LAS   = r"C:\Projects\Omni2LOD3\data\01_point_cloud\NIMBB 112025.las"
+OUTPUT_LAS  = r"C:\Projects\Omni2LOD3\outputs\00_archive\01_test_downsampled.las"
+VOXEL_SIZE  = 0.5
 
 # ------------------------------------------------------------------
-# 2. Ensure output folder exists
+# 2.  Ensure output folder exists
 # ------------------------------------------------------------------
 os.makedirs(os.path.dirname(OUTPUT_LAS), exist_ok=True)
 
 # ------------------------------------------------------------------
-# 3. Load LAS
+# 3.  Load LAS
 # ------------------------------------------------------------------
-print(f"-> Loading LAS: {INPUT_LAS}")
 las = laspy.read(INPUT_LAS)
-
 print(f"Input LAS Version: {las.header.version}")
 print(f"Input LAS Point Format: {las.header.point_format.id}")
-
-points = np.vstack((las.x, las.y, las.z)).T
+points  = np.vstack((las.x, las.y, las.z)).T
 classes = las.classification
 
 # ------------------------------------------------------------------
-# 4. Voxel downsampling
+# 4.  Voxel downsampling
 # ------------------------------------------------------------------
-print(f"-> Performing voxel downsampling (voxel size = {VOXEL_SIZE})...")
+print("-> Performing voxel downsampling...")
 pcd = o3d.geometry.PointCloud()
 pcd.points = o3d.utility.Vector3dVector(points)
 pcd = pcd.voxel_down_sample(voxel_size=VOXEL_SIZE)
 down_points = np.asarray(pcd.points)
-print(f"-> Reduced from {len(points):,} to {len(down_points):,} points.")
+print(f"-> Reduced from {len(points)} to {len(down_points)} points.")
 
 # ------------------------------------------------------------------
-# 5. Interpolate classifications (nearest neighbour)
+# 5.  Interpolate classifications (nearest neighbour)
 # ------------------------------------------------------------------
 print("-> Interpolating classifications from original point cloud...")
 tree = KDTree(points)
 indices = np.zeros(len(down_points), dtype=int)
-bar = create_bar("Processing points", len(down_points))
+bar = ChargingBar("Processing points", max=len(down_points), suffix="%(percent)d%%")
 for i in range(len(down_points)):
     _, idx = tree.query([down_points[i]], k=1)
     indices[i] = idx[0][0]
@@ -72,7 +52,7 @@ bar.finish()
 down_classes = classes[indices]
 
 # ------------------------------------------------------------------
-# 6. Save down-sampled LAS (copy VLRs as-is, no CRS parsing)
+# 6.  Save down-sampled LAS  (copy VLRs as-is, no CRS parsing)
 # ------------------------------------------------------------------
 print("-> Saving downsampled LAS...")
 header = laspy.LasHeader(point_format=2, version="1.2")

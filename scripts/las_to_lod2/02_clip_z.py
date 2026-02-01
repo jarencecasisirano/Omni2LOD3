@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# 02_clip_z.py
 import sys
 import os
 import numpy as np

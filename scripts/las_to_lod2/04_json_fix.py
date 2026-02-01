@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# 04_json_fix.py
 """
 CityJSON Empty Geometry Fixer
 ------------------------------

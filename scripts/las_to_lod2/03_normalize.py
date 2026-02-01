@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# 03_normalize.py
 """
 03_normalize.py
 Height normalization using PDAL (HAG via Delaunay)

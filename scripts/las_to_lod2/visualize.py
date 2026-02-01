@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# visualize.py
 import os
 import sys
 import laspy

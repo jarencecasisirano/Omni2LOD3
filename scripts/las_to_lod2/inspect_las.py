@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# inspect_las.py
 import os
 import sys
 import glob

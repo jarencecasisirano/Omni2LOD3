@@ -12,9 +12,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 
 SCRIPT_VISUALIZE = os.path.join(PROJECT_ROOT, "scripts", "las_to_lod2", "visualize.py")
 DATA_PC_DIR   = os.path.join(PROJECT_ROOT, "data", "01_point_cloud")
-OUT_DOWNSAMPLED = os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
-OUT_CLIPPED     = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
-OUT_NORMALIZED  = os.path.join(PROJECT_ROOT, "outputs", "03_normalized")
+OUT_DOWNSAMPLED = os.path.join(PROJECT_ROOT, "outputs", "00_downsampled")
+OUT_CLIPPED     = os.path.join(PROJECT_ROOT, "outputs", "01_clipped")
+OUT_NORMALIZED  = os.path.join(PROJECT_ROOT, "outputs", "02_normalized")
 
 FOLDER_MAP = {
     "1": ("Raw point clouds", DATA_PC_DIR),

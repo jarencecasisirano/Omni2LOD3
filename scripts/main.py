@@ -18,14 +18,14 @@ DATA_JSON_DIR = os.path.join(PROJECT_ROOT, "data", "03_json_model")
 OUT_INFO = os.path.join(PROJECT_ROOT, "outputs", "00_las_info")
 OUT_DOWNSAMPLED = os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
 OUT_CLIPPED     = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
-OUT_NORMALIZED  = os.path.join(PROJECT_ROOT, "outputs", "03_normalized")
+OUT_COMPLETE  = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
 OUT_LOD2_JSON   = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
 OUT_LOD2_GML    = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
 
 SCRIPT_INSPECT = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")
 SCRIPT_DOWN = os.path.join(SCRIPT_DIR, "las_to_lod2", "01_downsampling.py")
 SCRIPT_CLIP = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_clip_z.py")
-SCRIPT_NORM = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_normalize.py")
+SCRIPT_GEN = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_generate_facade_points.py")
 SCRIPT_FIX  = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_json_fix.py")
 SCRIPT_GML  = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_to_gml2.py")
 SCRIPT_VISUALIZE = os.path.join(SCRIPT_DIR, "las_to_lod2", "visualize.py")
@@ -38,7 +38,7 @@ def ensure_dirs():
     for d in (
         OUT_DOWNSAMPLED,
         OUT_CLIPPED,
-        OUT_NORMALIZED,
+        OUT_COMPLETE,
         OUT_LOD2_JSON,
         OUT_LOD2_GML,
     ):
@@ -139,39 +139,8 @@ def step_clip(input_las=None):
 
     return output_las
 
-def step_normalize(input_las=None):
-    if input_las is None:
-        files = list_las_files(OUT_CLIPPED)
-        input_las = choose_file(files, "Select clipped LAS to normalize:")
-        if not input_las:
-            return None
-
-    base = os.path.splitext(os.path.basename(input_las))[0]
-    base = strip_suffix(base, ["_clipped"])
-    output_las = os.path.join(OUT_NORMALIZED, f"{base}_normalized.las")
-
-    print("\n=== Running normalization ===")
-    print(f"Input:  {input_las}")
-    print(f"Output: {output_las}")
-
-    result = subprocess.run([
-        sys.executable,
-        SCRIPT_NORM,
-        input_las,
-        output_las
-    ])
-
-    if result.returncode != 0:
-        print("[ERROR] Normalization failed.")
-        return None
-
-    print("\n=== Point cloud ready for CityForge ===")
-    print("Please:")
-    print("  1. Open QGIS / CityForge")
-    print("  2. Digitize building footprint")
-    print("  3. Generate LOD2 CityJSON model")
-    print(f"  4. Save CityJSON to: {DATA_JSON_DIR}")
-
+def step_generate(input_las=None):
+    output_las = os.path.join(OUT_COMPLETE)
     return output_las
 
 def step_fix_cityjson():
@@ -246,7 +215,7 @@ def main():
     print("[0] Inspect point cloud")
     print("[1] Voxel downsample")
     print("[2] Clip Z outliers")
-    print("[3] Normalize point cloud")
+    print("[3] Generat")
     print("[4] Post-process CityJSON file")
     print("[5] Convert CityJSON to CityGML 2.0")
     print("[V] Visualize point cloud")
@@ -268,15 +237,15 @@ def main():
         if last_output:
             last_output = step_clip(last_output)
         if last_output:
-            last_output = step_normalize(last_output)
+            last_output = step_generate(last_output)
 
     elif choice == "2":
         last_output = step_clip()
         if last_output:
-            last_output = step_normalize(last_output)
+            last_output = step_generate(last_output)
 
     elif choice == "3":
-        step_normalize()
+        step_generate()
 
     elif choice == "4":
         step_fix_cityjson()

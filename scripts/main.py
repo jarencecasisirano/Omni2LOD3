@@ -1,4 +1,4 @@
-#main.py
+# main.py
 import os
 import sys
 import glob
@@ -22,12 +22,14 @@ OUT_COMPLETE    = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
 OUT_LOD2_JSON   = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
 OUT_LOD2_GML    = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
 
-SCRIPT_INSPECT = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")
-SCRIPT_DOWN = os.path.join(SCRIPT_DIR, "las_to_lod2", "01_downsampling.py")
-SCRIPT_CLIP = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_clip_z.py")
-SCRIPT_GEN = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_generate_facade_points.py")
-SCRIPT_FIX  = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_json_fix.py")
-SCRIPT_GML  = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_to_gml2.py")
+SCRIPT_CLEAN = os.path.join(SCRIPT_DIR, "las_to_lod2", "02b_cleanup_building_heights.py")
+
+SCRIPT_INSPECT   = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")
+SCRIPT_DOWN      = os.path.join(SCRIPT_DIR, "las_to_lod2", "01_downsampling.py")
+SCRIPT_CLIP      = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_clip_z.py")
+SCRIPT_GEN       = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_generate_facade_points.py")
+SCRIPT_FIX       = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_json_fix.py")
+SCRIPT_GML       = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_to_gml2.py")
 SCRIPT_VISUALIZE = os.path.join(SCRIPT_DIR, "las_to_lod2", "visualize.py")
 
 # ============================================================
@@ -73,6 +75,13 @@ def strip_suffix(name, suffixes):
         if name.endswith(s):
             return name[: -len(s)]
     return name
+
+def get_latest_cleaned_las():
+    files = sorted(
+        glob.glob(os.path.join(OUT_CLIPPED, "*_cleaned.las")),
+        key=os.path.getmtime
+    )
+    return files[-1] if files else None
 
 # ============================================================
 # Pipeline steps
@@ -139,22 +148,63 @@ def step_clip(input_las=None):
         print("[ERROR] Clipping failed.")
         return None
 
-    return output_las
+    # Run building-aware cleanup right after clip_z
+    cleaned_las = os.path.join(OUT_CLIPPED, f"{base}_clipped_cleaned.las")
 
-def step_generate(input_las=None):
-    if input_las is None:
-        files = list_las_files(OUT_CLIPPED)
-        input_las = choose_file(files, "Select clipped LAS to generate facades:")
+    print("\n=== Running building height cleanup ===")
+    print(f"Input:  {output_las}")
+    print(f"Output: {cleaned_las}")
+
+    footprint = choose_file(list_shp_files(DATA_SHP_DIR), "Select footprint SHP for cleanup:")
+    if not footprint:
+        return None
+
+    result2 = subprocess.run([
+        sys.executable,
+        SCRIPT_CLEAN,
+        output_las,
+        footprint,
+        cleaned_las
+    ])
+
+    if result2.returncode != 0:
+        print("[ERROR] Building cleanup failed.")
+        return None
+
+    if not os.path.exists(cleaned_las):
+        print(f"[ERROR] Cleaned LAS was not created: {cleaned_las}")
+        return None
+
+    return cleaned_las
+
+def step_generate(input_las=None, prompt_for_las=False):
+    """
+    Behavior:
+    - If prompt_for_las=True, ALWAYS ask user to choose LAS from outputs/02_clipped (non-copc).
+      This is for menu choice [3].
+    - If prompt_for_las=False, we expect caller (choice [2] or [1]) to pass input_las.
+      If it's missing, fall back to latest cleaned (legacy safety).
+    """
+
+    if prompt_for_las:
+        las_files = list_las_files(OUT_CLIPPED)
+        input_las = choose_file(las_files, "Select LAS in outputs/02_clipped to generate facades:")
         if not input_las:
             return None
+    else:
+        if input_las is None:
+            input_las = get_latest_cleaned_las()
+            if not input_las:
+                print("[ERROR] No *_cleaned.las found in 02_clipped.")
+                return None
 
     shp_files = list_shp_files(DATA_SHP_DIR)
-    footprint_shp = choose_file(shp_files, "Select footprint SHP to use:")
+    footprint_shp = choose_file(shp_files, "Select footprint SHP (used for facade):")
     if not footprint_shp:
         return None
 
     base = os.path.splitext(os.path.basename(input_las))[0]
-    base = strip_suffix(base, ["_clipped"])
+    base = strip_suffix(base, ["_clipped_cleaned", "_clipped"])
 
     output_las = os.path.join(OUT_COMPLETE, f"{base}_facade.las")
 
@@ -268,15 +318,16 @@ def main():
         if out:
             out = step_clip(out)
         if out:
-            step_generate(out)
+            step_generate(out, prompt_for_las=False)
 
     elif choice == "2":
         out = step_clip()
         if out:
-            step_generate(out)
+            step_generate(out, prompt_for_las=False)
 
     elif choice == "3":
-        step_generate()
+        # IMPORTANT: choice 3 should ask which LAS to use from outputs/02_clipped
+        step_generate(input_las=None, prompt_for_las=True)
 
     elif choice == "4":
         step_fix_cityjson()

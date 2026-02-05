@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-03_generate_facade_points.py
+03_generate_facade_points.py - IMPROVED VERSION (SAFE ROOF + EDGE ONLY)
 
-Generate synthetic facade points ON FOOTPRINT EDGES ONLY
-and append to original LAS, preserving CRS + header metadata.
+Generates dense, uniform facade points along building footprint edges
+with adaptive density and conservative roof height detection.
 """
 
 import sys
@@ -30,20 +30,37 @@ os.makedirs(LAS_OUTPUT.parent, exist_ok=True)
 
 TARGET_EPSG = 32651
 
+# Ground-to-building override (semantic fix for Pix4D)
+ENABLE_GROUND_OVERRIDE = True
+GROUND_TO_BUILDING_Z_OFFSET = 3.0  # meters
+
 # =========================
-# FACADE PARAMS
+# FACADE GENERATION PARAMS
 # =========================
 
-ROOF_PERCENTILE = 98.0
-Z_STEP = 0.5
+# Edge sampling
+EDGE_SAMPLE_DIST = 0.3
+MIN_EDGE_SAMPLE_DIST = 0.15
+
+# Vertical sampling
+Z_STEP = 0.25
 MIN_FACADE_HEIGHT = 2.0
 
-EDGE_SAMPLE_DIST = 0.75   # meters between facade columns
-XY_JITTER = 0.15          # horizontal noise (meters)
-Z_JITTER = 0.10           # vertical noise (meters)
-NEAR_EDGE_TOL = 1.0       # search radius for nearby LiDAR (m)
+# Roof detection (CONSERVATIVE)
+ROOF_PERCENTILE = 95.0
+ROOF_SAFETY_MARGIN = 0.6   # ⬅ STOP facade BELOW noisy roof
+GROUND_PERCENTILE = 5.0
 
-USE_BUILDING_CLASS_ONLY = True
+# Search radius for nearby LiDAR
+NEAR_EDGE_TOL = 1.5
+BACKUP_SEARCH_RADIUS = 3.0
+
+# Jitter (noise for realism)
+XY_JITTER = 0.08
+Z_JITTER = 0.05
+
+# Classification
+USE_BUILDING_CLASS_ONLY = False
 BUILDING_CLASS = 6
 
 # =========================
@@ -51,18 +68,80 @@ BUILDING_CLASS = 6
 # =========================
 
 def estimate_roof_z(z_values: np.ndarray, percentile: float) -> float:
+    if len(z_values) == 0:
+        return 0.0
     return float(np.percentile(z_values, percentile))
 
+def sample_edge_adaptively(linestring, base_dist, min_dist):
+    points = []
+    length = linestring.length
+
+    if length < min_dist:
+        return [linestring.interpolate(0.5, normalized=True)]
+
+    num_samples = max(2, int(np.ceil(length / base_dist)))
+
+    for i in range(num_samples):
+        frac = i / max(1, num_samples - 1)
+        points.append(linestring.interpolate(frac, normalized=True))
+
+    return points
+
+def find_roof_and_ground(X, Y, Z, cls, x0, y0, search_radius,
+                         building_class, use_building_only):
+
+    dx = X - x0
+    dy = Y - y0
+    dist2 = dx * dx + dy * dy
+
+    # Primary search
+    if use_building_only:
+        near_mask = (dist2 <= search_radius**2) & (cls == building_class)
+    else:
+        near_mask = dist2 <= search_radius**2
+
+    near_idx = np.where(near_mask)[0]
+
+    # Fallback search
+    if len(near_idx) < 10:
+        r = BACKUP_SEARCH_RADIUS
+        if use_building_only:
+            near_mask = (dist2 <= r**2) & (cls == building_class)
+        else:
+            near_mask = dist2 <= r**2
+        near_idx = np.where(near_mask)[0]
+
+    if len(near_idx) < 5:
+        return None, None, 0
+
+    z_near = Z[near_idx]
+
+    # Base + roof
+    z_ground = np.percentile(z_near, GROUND_PERCENTILE)
+
+    z_roof_raw = estimate_roof_z(z_near, ROOF_PERCENTILE)
+
+    # ✅ Conservative roof cap (STOP BELOW NOISY ROOF)
+    z_roof = z_roof_raw - ROOF_SAFETY_MARGIN
+
+    return z_ground, z_roof, len(near_idx)
+
+# =========================
+# MAIN
+# =========================
+
 def main():
-    print("=== 03_generate_facade_points.py ===")
-    print(f"Input LAS: {LAS_INPUT}")
-    print(f"Footprint SHP: {FOOTPRINT_SHP}")
-    print(f"Output LAS: {LAS_OUTPUT}")
+    print("\n" + "="*70)
+    print("IMPROVED FACADE POINT GENERATION (EDGE ONLY, SAFE ROOF)")
+    print("="*70)
+    print(f"Input LAS:      {LAS_INPUT}")
+    print(f"Footprint SHP:  {FOOTPRINT_SHP}")
+    print(f"Output LAS:     {LAS_OUTPUT}")
 
     # -------------------------
     # Load LAS
     # -------------------------
-    print("-> Reading LAS...")
+    print("\n-> Reading LAS...")
     las = laspy.read(LAS_INPUT)
 
     X = np.asarray(las.x)
@@ -74,35 +153,62 @@ def main():
     else:
         cls = np.zeros(len(Z), dtype=np.uint8)
 
-    print(f"Total points: {len(Z):,}")
+    print(f"   Total points: {len(Z):,}")
 
+    # -------------------------
+    # Global ground estimate
+    # -------------------------
+    if ENABLE_GROUND_OVERRIDE:
+        ground_mask = cls == 2
+        if ground_mask.sum() > 50:
+            global_ground_z = np.percentile(Z[ground_mask], 50)
+            print(f"Estimated global ground Z (median): {global_ground_z:.2f}")
+        else:
+            global_ground_z = np.percentile(Z, 5)
+            print(f"Fallback global ground Z (P5): {global_ground_z:.2f}")
+    else:
+        global_ground_z = None
+
+    # -------------------------
+    # Building mask + override
+    # -------------------------
     if USE_BUILDING_CLASS_ONLY:
         mask_building = cls == BUILDING_CLASS
-        print(f"Building-class points: {mask_building.sum():,}")
+
+        if ENABLE_GROUND_OVERRIDE and global_ground_z is not None:
+            ground_mask = cls == 2
+            high_ground_mask = ground_mask & (Z > global_ground_z + GROUND_TO_BUILDING_Z_OFFSET)
+
+            n_override = high_ground_mask.sum()
+            if n_override > 0:
+                print(f"Overriding {n_override:,} ground points → BUILDING (for facade logic)")
+
+            mask_building = mask_building | high_ground_mask
+
+        print(f"Building-class (incl overrides): {mask_building.sum():,}")
     else:
         mask_building = np.ones_like(Z, dtype=bool)
 
     # -------------------------
-    # Load Footprints
+    # Load footprints
     # -------------------------
-    print("-> Reading footprints...")
+    print("\n-> Reading footprints...")
     gdf = gpd.read_file(FOOTPRINT_SHP)
 
     if gdf.crs is None or gdf.crs.to_epsg() != TARGET_EPSG:
-        print(f"-> Reprojecting footprints to EPSG:{TARGET_EPSG}")
+        print(f"   Reprojecting to EPSG:{TARGET_EPSG}")
         gdf = gdf.to_crs(epsg=TARGET_EPSG)
 
     footprints = gdf.geometry.values
-    print(f"Number of footprints: {len(footprints)}")
+    print(f"   Footprints loaded: {len(footprints)}")
 
+    # -------------------------
+    # Generate facade points
+    # -------------------------
+    print("\n-> Generating facade points...")
     synthetic_xyz = []
 
-    # -------------------------
-    # Process footprints (EDGE ONLY)
-    # -------------------------
-    print("-> Generating facade points (edge-only)...")
-
-    for i, poly in enumerate(footprints):
+    for fp_idx, poly in enumerate(footprints):
         if poly is None or poly.is_empty:
             continue
 
@@ -110,33 +216,29 @@ def main():
         if boundary is None:
             continue
 
-        length = boundary.length
-        sample_dists = np.arange(0, length, EDGE_SAMPLE_DIST)
+        edge_points = sample_edge_adaptively(boundary,
+                                             EDGE_SAMPLE_DIST,
+                                             MIN_EDGE_SAMPLE_DIST)
 
-        for d in sample_dists:
-            p_edge = boundary.interpolate(d)
-            x0, y0 = p_edge.x, p_edge.y
+        for edge_pt in edge_points:
+            x0, y0 = edge_pt.x, edge_pt.y
 
-            # Nearby LiDAR for base + roof
-            dx = X - x0
-            dy = Y - y0
-            dist2 = dx * dx + dy * dy
+            z_ground, z_roof, n_nearby = find_roof_and_ground(
+                X, Y, Z, cls, x0, y0,
+                NEAR_EDGE_TOL,
+                BUILDING_CLASS,
+                USE_BUILDING_CLASS_ONLY
+            )
 
-            near_mask = (dist2 <= NEAR_EDGE_TOL**2) & mask_building
-            near_idx = np.where(near_mask)[0]
-
-            if len(near_idx) < 10:
+            if z_ground is None or z_roof is None:
                 continue
 
-            z_near = Z[near_idx]
-            z_base = np.percentile(z_near, 5)
-            z_roof = estimate_roof_z(z_near, ROOF_PERCENTILE)
-
-            facade_height = z_roof - z_base
+            facade_height = z_roof - z_ground
             if facade_height < MIN_FACADE_HEIGHT:
                 continue
 
-            z_vals = np.arange(z_base + Z_STEP, z_roof, Z_STEP)
+            # Vertical column
+            z_vals = np.arange(z_ground + Z_STEP, z_roof, Z_STEP)
 
             for z in z_vals:
                 xn = x0 + np.random.normal(0, XY_JITTER)
@@ -145,31 +247,29 @@ def main():
 
                 synthetic_xyz.append((xn, yn, zn))
 
-        if (i + 1) % 10 == 0:
-            print(f"  Processed {i+1} / {len(footprints)} footprints")
-
     synthetic_xyz = np.array(synthetic_xyz)
 
-    print(f"Synthetic facade points generated: {len(synthetic_xyz):,}")
+    print(f"\nSynthetic facade points generated: {len(synthetic_xyz):,}")
 
     if len(synthetic_xyz) == 0:
-        print("WARNING: No synthetic points generated.")
+        print("\n[ERROR] No synthetic points generated!")
+        print("Writing original LAS unchanged.")
+        las.write(LAS_OUTPUT)
         return
 
     # -------------------------
-    # Merge + write LAS (CRS SAFE — like 02_clip_z.py)
+    # Merge original + synthetic (PRESERVE CRS)
     # -------------------------
-    print("-> Merging original + synthetic points...")
+    print("\n-> Merging original + synthetic points...")
 
     new_las = laspy.create(
         point_format=las.header.point_format,
         file_version=las.header.version
     )
 
-    # CRITICAL: preserve full header (CRS, VLRs, scales, offsets)
+    # CRITICAL: preserve full header (CRS, VLRs, etc.)
     new_las.header = las.header
 
-    # Merge coords
     X_all = np.concatenate([X, synthetic_xyz[:, 0]])
     Y_all = np.concatenate([Y, synthetic_xyz[:, 1]])
     Z_all = np.concatenate([Z, synthetic_xyz[:, 2]])
@@ -178,11 +278,9 @@ def main():
     new_las.y = Y_all
     new_las.z = Z_all
 
-    # Merge classification
     cls_synth = np.full(len(synthetic_xyz), BUILDING_CLASS, dtype=cls.dtype)
     new_las.classification = np.concatenate([cls, cls_synth])
 
-    # Copy all other dimensions safely (like your clip script)
     for dim in las.point_format.dimension_names:
         if dim in ["X", "Y", "Z", "classification"]:
             continue
@@ -190,10 +288,17 @@ def main():
         pad = np.zeros(len(synthetic_xyz), dtype=arr.dtype)
         setattr(new_las, dim, np.concatenate([arr, pad]))
 
-    print(f"-> Writing output LAS: {LAS_OUTPUT}")
+    print(f"\n-> Writing output: {LAS_OUTPUT}")
     new_las.write(LAS_OUTPUT)
 
-    print("=== DONE ===")
+    print(f"\n   Original points:  {len(X):,}")
+    print(f"   Synthetic points: {len(synthetic_xyz):,}")
+    print(f"   Total points:     {len(X_all):,}")
+    print(f"   Synthetic ratio:  {100*len(synthetic_xyz)/len(X_all):.1f}%")
+
+    print("\n" + "="*70)
+    print("✓ DONE!")
+    print("="*70 + "\n")
 
 if __name__ == "__main__":
     main()

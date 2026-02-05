@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-03_generate_facade_points.py - IMPROVED VERSION (SAFE ROOF + EDGE ONLY)
+03_generate_facade_points.py - IMPROVED VERSION (SAFE ROOF + EDGE ONLY + FALLBACK)
 
 Generates dense, uniform facade points along building footprint edges
-with adaptive density and conservative roof height detection.
+with adaptive density, conservative roof height detection, and
+neighbor-height fallback for missing facade segments.
 """
 
 import sys
@@ -48,7 +49,7 @@ MIN_FACADE_HEIGHT = 2.0
 
 # Roof detection (CONSERVATIVE)
 ROOF_PERCENTILE = 95.0
-ROOF_SAFETY_MARGIN = 0.6   # ⬅ STOP facade BELOW noisy roof
+ROOF_SAFETY_MARGIN = 0.6   # ⬅ LOWER THIS to reduce overshoot (try 0.3 if needed)
 GROUND_PERCENTILE = 5.0
 
 # Search radius for nearby LiDAR
@@ -132,7 +133,7 @@ def find_roof_and_ground(X, Y, Z, cls, x0, y0, search_radius,
 
 def main():
     print("\n" + "="*70)
-    print("IMPROVED FACADE POINT GENERATION (EDGE ONLY, SAFE ROOF)")
+    print("IMPROVED FACADE POINT GENERATION (EDGE ONLY, SAFE ROOF + FALLBACK)")
     print("="*70)
     print(f"Input LAS:      {LAS_INPUT}")
     print(f"Footprint SHP:  {FOOTPRINT_SHP}")
@@ -208,6 +209,10 @@ def main():
     print("\n-> Generating facade points...")
     synthetic_xyz = []
 
+    # ⬇️ Neighbor fallback memory
+    last_good_z_ground = None
+    last_good_z_roof   = None
+
     for fp_idx, poly in enumerate(footprints):
         if poly is None or poly.is_empty:
             continue
@@ -216,9 +221,9 @@ def main():
         if boundary is None:
             continue
 
-        edge_points = sample_edge_adaptively(boundary,
-                                             EDGE_SAMPLE_DIST,
-                                             MIN_EDGE_SAMPLE_DIST)
+        edge_points = sample_edge_adaptively(
+            boundary, EDGE_SAMPLE_DIST, MIN_EDGE_SAMPLE_DIST
+        )
 
         for edge_pt in edge_points:
             x0, y0 = edge_pt.x, edge_pt.y
@@ -230,14 +235,31 @@ def main():
                 USE_BUILDING_CLASS_ONLY
             )
 
+            # -------------------------
+            # Neighbor-height fallback
+            # -------------------------
             if z_ground is None or z_roof is None:
-                continue
+                if last_good_z_ground is not None:
+                    z_ground = last_good_z_ground
+                    z_roof   = last_good_z_roof
+                else:
+                    continue
 
             facade_height = z_roof - z_ground
-            if facade_height < MIN_FACADE_HEIGHT:
-                continue
 
-            # Vertical column
+            if facade_height < MIN_FACADE_HEIGHT:
+                if last_good_z_ground is not None:
+                    z_ground = last_good_z_ground
+                    z_roof   = last_good_z_roof
+                    facade_height = z_roof - z_ground
+                else:
+                    continue
+
+            # Save good heights for neighbors
+            last_good_z_ground = z_ground
+            last_good_z_roof   = z_roof
+
+            # Vertical column (STOP before roof)
             z_vals = np.arange(z_ground + Z_STEP, z_roof, Z_STEP)
 
             for z in z_vals:

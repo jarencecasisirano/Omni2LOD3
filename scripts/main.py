@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#main.py
 import os
 import sys
 import glob
@@ -12,13 +12,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 
 DATA_PC_DIR   = os.path.join(PROJECT_ROOT, "data", "01_point_cloud")
-DATA_SHP_DIR = os.path.join(PROJECT_ROOT, "data", "02_footprint")
+DATA_SHP_DIR  = os.path.join(PROJECT_ROOT, "data", "02_footprint")
 DATA_JSON_DIR = os.path.join(PROJECT_ROOT, "data", "03_json_model")
 
 OUT_INFO = os.path.join(PROJECT_ROOT, "outputs", "00_las_info")
 OUT_DOWNSAMPLED = os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
 OUT_CLIPPED     = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
-OUT_COMPLETE  = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
+OUT_COMPLETE    = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
 OUT_LOD2_JSON   = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
 OUT_LOD2_GML    = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
 
@@ -48,9 +48,12 @@ def list_las_files(folder):
     files = sorted(glob.glob(os.path.join(folder, "*.las")))
     return [f for f in files if not f.lower().endswith(".copc.las")]
 
+def list_shp_files(folder):
+    return sorted(glob.glob(os.path.join(folder, "*.shp")))
+
 def choose_file(files, prompt):
     if not files:
-        print(f"[ERROR] No LAS files found for: {prompt}")
+        print(f"[ERROR] No files found for: {prompt}")
         return None
     print(f"\n{prompt}")
     for i, f in enumerate(files):
@@ -89,7 +92,6 @@ def step_downsample():
         print("[ERROR] Invalid voxel size.")
         return None
 
-    # Format voxel size for filename (0.5 -> 05, 0.2 -> 02, etc.)
     voxel_str = str(voxel_float).replace(".", "")
     output_las = os.path.join(OUT_DOWNSAMPLED, f"{base}_{voxel_str}_downsampled.las")
 
@@ -140,13 +142,45 @@ def step_clip(input_las=None):
     return output_las
 
 def step_generate(input_las=None):
-    output_las = os.path.join(OUT_COMPLETE)
+    if input_las is None:
+        files = list_las_files(OUT_CLIPPED)
+        input_las = choose_file(files, "Select clipped LAS to generate facades:")
+        if not input_las:
+            return None
+
+    shp_files = list_shp_files(DATA_SHP_DIR)
+    footprint_shp = choose_file(shp_files, "Select footprint SHP to use:")
+    if not footprint_shp:
+        return None
+
+    base = os.path.splitext(os.path.basename(input_las))[0]
+    base = strip_suffix(base, ["_clipped"])
+
+    output_las = os.path.join(OUT_COMPLETE, f"{base}_facade.las")
+
+    print("\n=== Generating facade points ===")
+    print(f"Input LAS:      {input_las}")
+    print(f"Footprint SHP:  {footprint_shp}")
+    print(f"Output LAS:     {output_las}")
+
+    result = subprocess.run([
+        sys.executable,
+        SCRIPT_GEN,
+        input_las,
+        footprint_shp,
+        output_las
+    ])
+
+    if result.returncode != 0:
+        print("[ERROR] Facade generation failed.")
+        return None
+
     return output_las
 
 def step_fix_cityjson():
     json_files = sorted(glob.glob(os.path.join(DATA_JSON_DIR, "*.json")))
     if not json_files:
-        print("[ERROR] No CityJSON files found in data/02_json_model")
+        print("[ERROR] No CityJSON files found in data/03_json_model")
         return None
 
     input_json = choose_file(json_files, "Select CityJSON file to fix:")
@@ -204,7 +238,7 @@ def step_json_to_gml():
     return output_gml
 
 # ============================================================
-# Main menu + auto pipeline
+# Main menu
 # ============================================================
 
 def main():
@@ -215,7 +249,7 @@ def main():
     print("[0] Inspect point cloud")
     print("[1] Voxel downsample")
     print("[2] Clip Z outliers")
-    print("[3] Generat")
+    print("[3] Generate facade points")
     print("[4] Post-process CityJSON file")
     print("[5] Convert CityJSON to CityGML 2.0")
     print("[V] Visualize point cloud")
@@ -226,23 +260,20 @@ def main():
     if choice == "q":
         return
 
-    last_output = None
-
     if choice == "0":
         subprocess.run([sys.executable, SCRIPT_INSPECT])
-        return
 
     elif choice == "1":
-        last_output = step_downsample()
-        if last_output:
-            last_output = step_clip(last_output)
-        if last_output:
-            last_output = step_generate(last_output)
+        out = step_downsample()
+        if out:
+            out = step_clip(out)
+        if out:
+            step_generate(out)
 
     elif choice == "2":
-        last_output = step_clip()
-        if last_output:
-            last_output = step_generate(last_output)
+        out = step_clip()
+        if out:
+            step_generate(out)
 
     elif choice == "3":
         step_generate()
@@ -255,7 +286,6 @@ def main():
 
     elif choice == "v":
         subprocess.run([sys.executable, SCRIPT_VISUALIZE])
-        return
 
     else:
         print("[ERROR] Invalid choice.")

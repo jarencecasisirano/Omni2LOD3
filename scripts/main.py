@@ -174,9 +174,9 @@ def pick_visualize_las():
 
     if choice == "2":
         print(f"\nSelect outputs subfolder:")
-        print("  [0] 01_downsampled")
-        print("  [1] 02_clipped")
-        print("  [2] 03_complete_las")
+        print("[0] Downsampled")
+        print("[1] Clipped")
+        print("[2] Complete point cloud")
         sub = input("Enter index: ").strip()
 
         if sub == "0":

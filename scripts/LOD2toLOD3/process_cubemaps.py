@@ -8,6 +8,7 @@ def process_images(input_dir, output_dir):
         os.makedirs(output_dir)
 
     images = [f for f in os.listdir(input_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    images.sort()
     
     faces = ['pz', 'nz', 'px', 'nx', 'py', 'ny']
     
@@ -52,7 +53,46 @@ def process_images(input_dir, output_dir):
             print(f"  Saved {output_name}")
 
 if __name__ == "__main__":
-    INPUT_DIR = r"c:\Users\Sky Torneros\Omni2LOD3\data\raw_images"
-    OUTPUT_DIR = r"c:\Users\Sky Torneros\Omni2LOD3\outputs\01_cubemaps"
+    # Determine project root (assuming script is in scripts/LOD2toLOD3)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, "../../"))
+    
+    base_input_dir = os.path.join(project_root, "data", "raw_images")
+    base_output_dir = os.path.join(project_root, "outputs", "01_cubemaps")
+    
+    if not os.path.exists(base_input_dir):
+        print(f"Error: Input directory not found: {base_input_dir}")
+        exit(1)
+        
+    # List subdirectories
+    subdirs = [d for d in os.listdir(base_input_dir) if os.path.isdir(os.path.join(base_input_dir, d))]
+    subdirs.sort()
+    
+    if not subdirs:
+        print(f"No subdirectories found in {base_input_dir}")
+        exit(1)
+        
+    print("Available folders to process:")
+    for i, d in enumerate(subdirs):
+        print(f"{i + 1}: {d}")
+        
+    while True:
+        try:
+            selection = input("\nEnter the number of the folder you want to process: ")
+            index = int(selection) - 1
+            if 0 <= index < len(subdirs):
+                selected_subdir = subdirs[index]
+                break
+            else:
+                print("Invalid selection. Please try again.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+            
+    INPUT_DIR = os.path.join(base_input_dir, selected_subdir)
+    OUTPUT_DIR = os.path.join(base_output_dir, selected_subdir)
+    
+    print(f"\nProcessing folder: {selected_subdir}")
+    print(f"Input: {INPUT_DIR}")
+    print(f"Output: {OUTPUT_DIR}")
     
     process_images(INPUT_DIR, OUTPUT_DIR)

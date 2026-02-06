@@ -49,13 +49,13 @@ Z_MAX = float(sys.argv[4]) if len(sys.argv) >= 5 else None
 # ------------------------------------------------------------------
 # Conservative global percentiles
 PERCENTILE_LOW  = 2.0
-PERCENTILE_HIGH = 99.0
+PERCENTILE_HIGH = 99.5
 
 # Gentle MAD outlier threshold (EXTREME fliers only)
 MAD_THRESHOLD = 10.0
 
 # Classification filtering (optional)
-REMOVE_VEG_CLASSES = True
+REMOVE_VEG_CLASSES = False
 VEG_CLASSES = [3, 4, 5]  # Low, Medium, High Vegetation
 
 # ------------------------------------------------------------------

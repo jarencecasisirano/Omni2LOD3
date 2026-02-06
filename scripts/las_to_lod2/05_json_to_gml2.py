@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
+# 05_json_to_gml2.py
 """
-05_json_to_gml2.py
 Convert CityJSON -> CityGML 2.0 using citygml-tools (from-cityjson).
 
 Pipeline-friendly:

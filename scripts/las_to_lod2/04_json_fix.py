@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
-"""
-04_json_fix.py
+# 04_json_fix.py
 
+""""
 LOD2 CityJSON Empty Geometry Fixer (PIPELINE-FRIENDLY)
 
 Behavior:

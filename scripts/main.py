@@ -15,22 +15,22 @@ DATA_PC_DIR   = os.path.join(PROJECT_ROOT, "data", "01_point_cloud")
 DATA_SHP_DIR  = os.path.join(PROJECT_ROOT, "data", "02_footprint")
 DATA_JSON_DIR = os.path.join(PROJECT_ROOT, "data", "03_json_model")
 
-OUT_INFO = os.path.join(PROJECT_ROOT, "outputs", "00_las_info")
-OUT_DOWNSAMPLED = os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
-OUT_CLIPPED     = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
-OUT_COMPLETE    = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
-OUT_LOD2_JSON   = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
-OUT_LOD2_GML    = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
+OUT_INFO       = os.path.join(PROJECT_ROOT, "outputs", "00_las_info")
+OUT_DOWNSAMPLED= os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
+OUT_CLIPPED    = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
+OUT_COMPLETE   = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
+OUT_LOD2_JSON  = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
+OUT_LOD2_GML   = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
 
-SCRIPT_CLEAN = os.path.join(SCRIPT_DIR, "las_to_lod2", "02b_cleanup_building_heights.py")
+SCRIPT_CLEAN    = os.path.join(SCRIPT_DIR, "las_to_lod2", "02b_cleanup_building_heights.py")
+SCRIPT_INSPECT  = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")
+SCRIPT_DOWN     = os.path.join(SCRIPT_DIR, "las_to_lod2", "01_downsampling.py")
+SCRIPT_CLIP     = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_clip_z.py")
+SCRIPT_GEN      = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_generate_facade_points.py")
+SCRIPT_FIX      = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_json_fix.py")
+SCRIPT_GML      = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_to_gml2.py")
+SCRIPT_VISUALIZE= os.path.join(SCRIPT_DIR, "las_to_lod2", "visualize.py")
 
-SCRIPT_INSPECT   = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")
-SCRIPT_DOWN      = os.path.join(SCRIPT_DIR, "las_to_lod2", "01_downsampling.py")
-SCRIPT_CLIP      = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_clip_z.py")
-SCRIPT_GEN       = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_generate_facade_points.py")
-SCRIPT_FIX       = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_json_fix.py")
-SCRIPT_GML       = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_to_gml2.py")
-SCRIPT_VISUALIZE = os.path.join(SCRIPT_DIR, "las_to_lod2", "visualize.py")
 
 # ============================================================
 # Utilities
@@ -38,6 +38,7 @@ SCRIPT_VISUALIZE = os.path.join(SCRIPT_DIR, "las_to_lod2", "visualize.py")
 
 def ensure_dirs():
     for d in (
+        OUT_INFO,
         OUT_DOWNSAMPLED,
         OUT_CLIPPED,
         OUT_COMPLETE,
@@ -52,6 +53,9 @@ def list_las_files(folder):
 
 def list_shp_files(folder):
     return sorted(glob.glob(os.path.join(folder, "*.shp")))
+
+def list_json_files(folder):
+    return sorted(glob.glob(os.path.join(folder, "*.json")))
 
 def choose_file(files, prompt):
     if not files:
@@ -83,6 +87,115 @@ def get_latest_cleaned_las():
     )
     return files[-1] if files else None
 
+def extract_prefix(file_path):
+    """
+    Prefix heuristic: take first token before '_' from filename.
+    NEC_112025_05_clipped_cleaned.las -> NEC
+    nimbb_020626_fixed.json -> nimbb
+    """
+    base = os.path.splitext(os.path.basename(file_path))[0]
+    if "_" in base:
+        return base.split("_")[0]
+    return base
+
+def detect_las_crs(las_path):
+    """
+    Best-effort CRS detection using laspy header.parse_crs().
+    Returns str or None.
+    """
+    try:
+        import laspy
+        las = laspy.read(las_path)
+        crs = las.header.parse_crs()
+        return str(crs) if crs is not None else None
+    except Exception:
+        return None
+
+def auto_select_footprint_for_las(las_path):
+    """
+    Try to pick a footprint shapefile automatically using LAS prefix.
+
+    Rules:
+    - Match prefix token (case-insensitive) against shapefile basename.
+      e.g. prefix 'NEC' matches 'NEC_footprint_1.shp' or 'nec_fp.shp'
+    - If exactly one match: return it (auto)
+    - If multiple matches: prompt user among matches
+    - If none: return None
+    """
+    shp_files = list_shp_files(DATA_SHP_DIR)
+    if not shp_files:
+        return None
+
+    prefix = extract_prefix(las_path).lower()
+
+    matches = []
+    for shp in shp_files:
+        name = os.path.basename(shp).lower()
+        if name.startswith(prefix + "_") or name.startswith(prefix) or (prefix in name):
+            matches.append(shp)
+
+    # Prefer "startswith(prefix_...)" matches if they exist
+    strict = [m for m in matches if os.path.basename(m).lower().startswith(prefix + "_")]
+    if strict:
+        matches = strict
+
+    if len(matches) == 1:
+        print(f"\n[Auto] Using footprint: {os.path.basename(matches[0])} (matched prefix '{prefix.upper()}')")
+        return matches[0]
+
+    if len(matches) > 1:
+        return choose_file(matches, f"Multiple footprints match '{prefix.upper()}'. Select footprint SHP:")
+
+    return None
+
+def tell_user_digitize_footprint(las_path):
+    crs = detect_las_crs(las_path)
+    print("\n[WARNING] No matching footprint shapefile found.")
+    print("Please digitize a footprint shapefile for this building and save it to:")
+    print(f"  {DATA_SHP_DIR}")
+    print("Make sure the shapefile CRS matches the LAS CRS.")
+    print(f"Detected LAS CRS: {crs if crs else 'Unknown (could not parse CRS from LAS header)'}")
+
+
+def pick_visualize_las():
+    """
+    New behavior:
+    - If user picks 'data' -> immediately list LAS in data/01_point_cloud
+    - If user picks 'outputs' -> ask which output subfolder (downsampled/clipped/complete)
+    """
+    print("\nSelect folder:")
+    print("  [1] data")
+    print("  [2] outputs")
+    choice = input("Enter number: ").strip()
+
+    if choice == "1":
+        files = list_las_files(DATA_PC_DIR)
+        return choose_file(files, "Select LAS file in data/01_point_cloud:")
+
+    if choice == "2":
+        print(f"\nSelect outputs subfolder:")
+        print("  [0] 01_downsampled")
+        print("  [1] 02_clipped")
+        print("  [2] 03_complete_las")
+        sub = input("Enter index: ").strip()
+
+        if sub == "0":
+            folder = OUT_DOWNSAMPLED
+        elif sub == "1":
+            folder = OUT_CLIPPED
+        elif sub == "2":
+            folder = OUT_COMPLETE
+        else:
+            print("[ERROR] Invalid selection.")
+            return None
+
+        files = list_las_files(folder)
+        return choose_file(files, f"Select LAS file in {os.path.basename(folder)}:")
+
+    print("[ERROR] Invalid selection.")
+    return None
+
+
 # ============================================================
 # Pipeline steps
 # ============================================================
@@ -108,14 +221,7 @@ def step_downsample():
     print(f"Input:  {input_las}")
     print(f"Output: {output_las}")
 
-    result = subprocess.run([
-        sys.executable,
-        SCRIPT_DOWN,
-        input_las,
-        output_las,
-        voxel
-    ])
-
+    result = subprocess.run([sys.executable, SCRIPT_DOWN, input_las, output_las, voxel])
     if result.returncode != 0:
         print("[ERROR] Downsampling failed.")
         return None
@@ -137,13 +243,7 @@ def step_clip(input_las=None):
     print(f"Input:  {input_las}")
     print(f"Output: {output_las}")
 
-    result = subprocess.run([
-        sys.executable,
-        SCRIPT_CLIP,
-        input_las,
-        output_las
-    ])
-
+    result = subprocess.run([sys.executable, SCRIPT_CLIP, input_las, output_las])
     if result.returncode != 0:
         print("[ERROR] Clipping failed.")
         return None
@@ -155,18 +255,18 @@ def step_clip(input_las=None):
     print(f"Input:  {output_las}")
     print(f"Output: {cleaned_las}")
 
-    footprint = choose_file(list_shp_files(DATA_SHP_DIR), "Select footprint SHP for cleanup:")
+    # Auto-pick footprint based on LAS prefix; fallback to prompt
+    footprint = auto_select_footprint_for_las(output_las)
     if not footprint:
-        return None
+        # If no match, let user choose ANY if available, else instruct digitize
+        all_shps = list_shp_files(DATA_SHP_DIR)
+        if all_shps:
+            footprint = choose_file(all_shps, "No obvious footprint match. Select footprint SHP for cleanup:")
+        else:
+            tell_user_digitize_footprint(output_las)
+            return None
 
-    result2 = subprocess.run([
-        sys.executable,
-        SCRIPT_CLEAN,
-        output_las,
-        footprint,
-        cleaned_las
-    ])
-
+    result2 = subprocess.run([sys.executable, SCRIPT_CLEAN, output_las, footprint, cleaned_las])
     if result2.returncode != 0:
         print("[ERROR] Building cleanup failed.")
         return None
@@ -183,9 +283,8 @@ def step_generate(input_las=None, prompt_for_las=False):
     - If prompt_for_las=True, ALWAYS ask user to choose LAS from outputs/02_clipped (non-copc).
       This is for menu choice [3].
     - If prompt_for_las=False, we expect caller (choice [2] or [1]) to pass input_las.
-      If it's missing, fall back to latest cleaned (legacy safety).
+      If it's missing, fall back to latest cleaned.
     """
-
     if prompt_for_las:
         las_files = list_las_files(OUT_CLIPPED)
         input_las = choose_file(las_files, "Select LAS in outputs/02_clipped to generate facades:")
@@ -198,14 +297,18 @@ def step_generate(input_las=None, prompt_for_las=False):
                 print("[ERROR] No *_cleaned.las found in 02_clipped.")
                 return None
 
-    shp_files = list_shp_files(DATA_SHP_DIR)
-    footprint_shp = choose_file(shp_files, "Select footprint SHP (used for facade):")
+    # Auto-pick footprint based on LAS prefix; fallback to prompt
+    footprint_shp = auto_select_footprint_for_las(input_las)
     if not footprint_shp:
-        return None
+        all_shps = list_shp_files(DATA_SHP_DIR)
+        if all_shps:
+            footprint_shp = choose_file(all_shps, "No obvious footprint match. Select footprint SHP (used for facade):")
+        else:
+            tell_user_digitize_footprint(input_las)
+            return None
 
     base = os.path.splitext(os.path.basename(input_las))[0]
     base = strip_suffix(base, ["_clipped_cleaned", "_clipped"])
-
     output_las = os.path.join(OUT_COMPLETE, f"{base}_facade.las")
 
     print("\n=== Generating facade points ===")
@@ -213,24 +316,26 @@ def step_generate(input_las=None, prompt_for_las=False):
     print(f"Footprint SHP:  {footprint_shp}")
     print(f"Output LAS:     {output_las}")
 
-    result = subprocess.run([
-        sys.executable,
-        SCRIPT_GEN,
-        input_las,
-        footprint_shp,
-        output_las
-    ])
-
+    result = subprocess.run([sys.executable, SCRIPT_GEN, input_las, footprint_shp, output_las])
     if result.returncode != 0:
         print("[ERROR] Facade generation failed.")
         return None
 
+    # End-of-step guidance
+    print("\n======================================================================")
+    print("✅ Point cloud is now ready for CityForge processing.")
+    print("Next:")
+    print(f"  1) Run CityForge using: {output_las}")
+    print(f"  2) Save/export the resulting CityJSON into: {DATA_JSON_DIR}")
+    print("  3) Then run menu option [4] (Post-process CityJSON) and [5] (Convert to CityGML 2.0)")
+    print("======================================================================\n")
+
     return output_las
 
 def step_fix_cityjson():
-    json_files = sorted(glob.glob(os.path.join(DATA_JSON_DIR, "*.json")))
+    json_files = list_json_files(DATA_JSON_DIR)
     if not json_files:
-        print("[ERROR] No CityJSON files found in data/03_json_model")
+        print(f"[ERROR] No CityJSON files found in: {DATA_JSON_DIR}")
         return None
 
     input_json = choose_file(json_files, "Select CityJSON file to fix:")
@@ -244,23 +349,21 @@ def step_fix_cityjson():
     print(f"Input:  {input_json}")
     print(f"Output: {output_json}")
 
-    result = subprocess.run([
-        sys.executable,
-        SCRIPT_FIX,
-        input_json,
-        output_json
-    ])
-
+    result = subprocess.run([sys.executable, SCRIPT_FIX, input_json, output_json])
     if result.returncode != 0:
         print("[ERROR] CityJSON fix failed.")
+        return None
+
+    if not os.path.exists(output_json):
+        print(f"[ERROR] Expected output not created: {output_json}")
         return None
 
     return output_json
 
 def step_json_to_gml():
-    json_files = sorted(glob.glob(os.path.join(OUT_LOD2_JSON, "*.json")))
+    json_files = list_json_files(OUT_LOD2_JSON)
     if not json_files:
-        print("[ERROR] No fixed CityJSON files found in outputs/04_LOD2_json")
+        print(f"[ERROR] No fixed CityJSON files found in: {OUT_LOD2_JSON}")
         return None
 
     input_json = choose_file(json_files, "Select fixed CityJSON to convert to CityGML:")
@@ -274,18 +377,17 @@ def step_json_to_gml():
     print(f"Input:  {input_json}")
     print(f"Output: {output_gml}")
 
-    result = subprocess.run([
-        sys.executable,
-        SCRIPT_GML,
-        input_json,
-        output_gml
-    ])
-
+    result = subprocess.run([sys.executable, SCRIPT_GML, input_json, output_gml])
     if result.returncode != 0:
         print("[ERROR] CityJSON to CityGML failed.")
         return None
 
+    if not os.path.exists(output_gml):
+        print(f"[ERROR] Expected output not created: {output_gml}")
+        return None
+
     return output_gml
+
 
 # ============================================================
 # Main menu
@@ -311,7 +413,11 @@ def main():
         return
 
     if choice == "0":
-        subprocess.run([sys.executable, SCRIPT_INSPECT])
+        # Let main.py choose LAS; then call inspect with filepath
+        las_path = pick_visualize_las()  # reusing the improved picker
+        if not las_path:
+            return
+        subprocess.run([sys.executable, SCRIPT_INSPECT, las_path])
 
     elif choice == "1":
         out = step_downsample()
@@ -326,7 +432,6 @@ def main():
             step_generate(out, prompt_for_las=False)
 
     elif choice == "3":
-        # IMPORTANT: choice 3 should ask which LAS to use from outputs/02_clipped
         step_generate(input_las=None, prompt_for_las=True)
 
     elif choice == "4":
@@ -336,7 +441,10 @@ def main():
         step_json_to_gml()
 
     elif choice == "v":
-        subprocess.run([sys.executable, SCRIPT_VISUALIZE])
+        las_path = pick_visualize_las()
+        if not las_path:
+            return
+        subprocess.run([sys.executable, SCRIPT_VISUALIZE, las_path])
 
     else:
         print("[ERROR] Invalid choice.")

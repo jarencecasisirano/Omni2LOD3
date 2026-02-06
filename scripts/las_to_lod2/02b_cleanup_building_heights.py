@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
+# 02b_cleanup_building_heights.py
 """
-02b_cleanup_building_heights.py
-
 FAST + SAFE local building-aware cleanup:
 - Operates ONLY inside building footprints
 - Forces building class inside footprints

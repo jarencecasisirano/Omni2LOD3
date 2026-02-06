@@ -144,39 +144,14 @@ def inspect_las(las_path):
 
 def main():
     print("\n=== Inspect LAS File ===")
-    
-    # Step 1: Choose folder
-    folder = choose_folder()
-    if not folder:
-        return
-    
-    # Step 2: Check if folder exists
-    if not os.path.exists(folder):
-        print(f"[ERROR] Folder does not exist: {folder}")
-        return
-    
-    # Step 3: List LAS files
-    files = list_las_files(folder)
-    if not files:
-        print(f"[ERROR] No LAS files found in: {folder}")
-        return
-    
-    # Step 4: Choose file
-    las_file = choose_file(files, "Select LAS file to inspect:")
-    if not las_file:
-        return
 
-    # Step 5: Inspect the file
-    inspect_las(las_file)
-
-    # Step 6: Optionally visualize
-    ans = input("\nWould you like to visualize this point cloud? [y/N]: ").strip().lower()
-    if ans == "y":
-        subprocess.run([
-            sys.executable,
-            SCRIPT_VISUALIZE,
-            las_file
-        ])
+    # NEW: if a LAS path is provided, inspect directly
+    if len(sys.argv) >= 2 and os.path.exists(sys.argv[1]):
+        inspect_las(sys.argv[1])
+        ans = input("\nWould you like to visualize this point cloud? [y/N]: ").strip().lower()
+        if ans == "y":
+            subprocess.run([sys.executable, SCRIPT_VISUALIZE, sys.argv[1]])
+        return
 
 if __name__ == "__main__":
     main()

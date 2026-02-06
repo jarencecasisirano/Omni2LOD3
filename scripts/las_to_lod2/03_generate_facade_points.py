@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
+# 03_generate_facade_points.py
 """
-03_generate_facade_points.py - IMPROVED VERSION (SAFE ROOF + EDGE ONLY + FALLBACK + EDGE GAP FILL)
-
 Base behavior (your working version):
 - Two-pass per-polygon processing
   PASS A: estimate z_ground/z_roof per edge sample + record which samples were "supported"

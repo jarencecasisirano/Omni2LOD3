@@ -20,6 +20,8 @@ OUT_DOWNSAMPLED= os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
 OUT_CLIPPED    = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
 OUT_COMPLETE   = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
 OUT_LOD2_JSON  = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
+OUT_VAL3DITY   = os.path.join(PROJECT_ROOT, "outputs", "04_val3dity")
+OUT_LOD2_JSON_FIXED = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_json")
 OUT_LOD2_GML   = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
 
 SCRIPT_CLEAN    = os.path.join(SCRIPT_DIR, "las_to_lod2", "02b_cleanup_building_heights.py")
@@ -27,8 +29,9 @@ SCRIPT_INSPECT  = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")
 SCRIPT_DOWN     = os.path.join(SCRIPT_DIR, "las_to_lod2", "01_downsampling.py")
 SCRIPT_CLIP     = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_clip_z.py")
 SCRIPT_GEN      = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_generate_facade_points.py")
-SCRIPT_FIX      = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_json_fix.py")
-SCRIPT_GML      = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_to_gml2.py")
+SCRIPT_VALIDATE = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_validate_val3dity.py")
+SCRIPT_FIX      = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_fix.py")
+SCRIPT_GML      = os.path.join(SCRIPT_DIR, "las_to_lod2", "06_json_to_gml2.py")
 SCRIPT_VISUALIZE= os.path.join(SCRIPT_DIR, "las_to_lod2", "visualize.py")
 
 
@@ -43,6 +46,8 @@ def ensure_dirs():
         OUT_CLIPPED,
         OUT_COMPLETE,
         OUT_LOD2_JSON,
+        OUT_VAL3DITY,
+        OUT_LOD2_JSON_FIXED,
         OUT_LOD2_GML,
     ):
         os.makedirs(d, exist_ok=True)
@@ -360,15 +365,21 @@ def step_fix_cityjson():
 
     return output_json
 
-def step_json_to_gml():
-    json_files = list_json_files(OUT_LOD2_JSON)
-    if not json_files:
-        print(f"[ERROR] No fixed CityJSON files found in: {OUT_LOD2_JSON}")
-        return None
+def step_json_to_gml(input_json=None):
+    if input_json is None:
+        json_files = list_json_files(OUT_LOD2_JSON_FIXED)
+        source_dir = OUT_LOD2_JSON_FIXED
+        if not json_files:
+            json_files = list_json_files(OUT_LOD2_JSON)
+            source_dir = OUT_LOD2_JSON
 
-    input_json = choose_file(json_files, "Select fixed CityJSON to convert to CityGML:")
-    if not input_json:
-        return None
+        if not json_files:
+            print(f"[ERROR] No fixed CityJSON files found in: {OUT_LOD2_JSON_FIXED} or {OUT_LOD2_JSON}")
+            return None
+
+        input_json = choose_file(json_files, f"Select fixed CityJSON to convert to CityGML ({os.path.basename(source_dir)}):")
+        if not input_json:
+            return None
 
     base = os.path.splitext(os.path.basename(input_json))[0]
     output_gml = os.path.join(OUT_LOD2_GML, f"{base}.gml")
@@ -389,6 +400,63 @@ def step_json_to_gml():
     return output_gml
 
 
+def step_validate_then_fix():
+    json_files = list_json_files(DATA_JSON_DIR)
+    if not json_files:
+        print(f"[ERROR] No CityJSON files found in: {DATA_JSON_DIR}")
+        return None
+
+    input_json = choose_file(json_files, "Select CityJSON file to validate:")
+    if not input_json:
+        return None
+
+    print("\n=== Running val3dity validation ===")
+    result = subprocess.run([sys.executable, SCRIPT_VALIDATE, input_json])
+
+    if result.returncode == 1:
+        print("[ERROR] Validation failed.")
+        return None
+
+    if result.returncode == 0:
+        print("[OK] CityJSON is valid.")
+        step_json_to_gml(input_json)
+        return input_json
+
+    if result.returncode == 2:
+        print("[WARN] CityJSON is invalid. Running fix...")
+
+        base = os.path.splitext(os.path.basename(input_json))[0]
+        output_json = os.path.join(OUT_LOD2_JSON_FIXED, f"{base}_FIXED.json")
+
+        print("\n=== Running CityJSON fix ===")
+        print(f"Input:  {input_json}")
+        print(f"Output: {output_json}")
+
+        result_fix = subprocess.run([sys.executable, SCRIPT_FIX, input_json, output_json])
+        if result_fix.returncode != 0:
+            print("[ERROR] CityJSON fix failed.")
+            return None
+
+        if not os.path.exists(output_json):
+            print(f"[ERROR] Expected output not created: {output_json}")
+            return None
+
+        print("\n=== Re-running val3dity on fixed file ===")
+        result2 = subprocess.run([sys.executable, SCRIPT_VALIDATE, output_json])
+        if result2.returncode == 0:
+            print("[OK] Fixed CityJSON is valid.")
+            step_json_to_gml(output_json)
+            return output_json
+        if result2.returncode == 2:
+            print("[WARN] Fixed CityJSON is still invalid.")
+            return None
+        print("[ERROR] Validation failed on fixed file.")
+        return None
+
+    print("[ERROR] Unexpected validation exit code.")
+    return None
+
+
 # ============================================================
 # Main menu
 # ============================================================
@@ -402,8 +470,9 @@ def main():
     print("[1] Voxel downsample")
     print("[2] Clip Z outliers")
     print("[3] Generate facade points")
-    print("[4] Post-process CityJSON file")
-    print("[5] Convert CityJSON to CityGML 2.0")
+    print("[4] Validate (then fix if invalid)")
+    print("[5] Post-process CityJSON file")
+    print("[6] Convert CityJSON to CityGML 2.0")
     print("[V] Visualize point cloud")
     print("[Q] Quit")
 
@@ -435,9 +504,12 @@ def main():
         step_generate(input_las=None, prompt_for_las=True)
 
     elif choice == "4":
-        step_fix_cityjson()
+        step_validate_then_fix()
 
     elif choice == "5":
+        step_fix_cityjson()
+
+    elif choice == "6":
         step_json_to_gml()
 
     elif choice == "v":

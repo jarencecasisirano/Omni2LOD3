@@ -22,7 +22,7 @@ OUT_COMPLETE   = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
 OUT_LOD2_JSON  = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
 OUT_VAL3DITY   = os.path.join(PROJECT_ROOT, "outputs", "04_val3dity")
 OUT_LOD2_JSON_FIXED = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_json")
-OUT_LOD2_GML   = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
+OUT_LOD2_GML   = os.path.join(PROJECT_ROOT, "outputs", "06_LOD2_gml")
 
 SCRIPT_CLEAN    = os.path.join(SCRIPT_DIR, "las_to_lod2", "02b_cleanup_building_heights.py")
 SCRIPT_INSPECT  = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")

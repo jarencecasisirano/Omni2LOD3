@@ -3,8 +3,9 @@ import numpy as np
 import open3d as o3d
 from pathlib import Path
 
-# Root folders
-PROJECT_ROOT = Path(r"C:\Projects\Thesis")
+# Root folders - dynamically determined from script location
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent  # scripts/ -> project root
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 

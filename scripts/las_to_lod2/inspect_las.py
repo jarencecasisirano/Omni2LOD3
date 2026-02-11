@@ -18,8 +18,7 @@ os.makedirs(OUT_INFO, exist_ok=True)
 
 # Output folders
 OUT_DOWNSAMPLED = os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
-OUT_CLIPPED = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
-OUT_COMPLETE = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
+OUT_RECLASSIFIED = os.path.join(PROJECT_ROOT, "outputs", "02_reclassified")
 
 def list_las_files(folder):
     files = sorted(glob.glob(os.path.join(folder, "*.las")))
@@ -62,17 +61,14 @@ def choose_output_subfolder():
     """Let user select which output subfolder to inspect"""
     print("\n=== Select Output Subfolder ===")
     print("[0] Downsampled")
-    print("[1] Clipped")
-    print("[2] Complete point cloud")
+    print("[1] Reclassified")
     
     choice = input("Enter index: ").strip()
     
     if choice == "0":
         return OUT_DOWNSAMPLED
     elif choice == "1":
-        return OUT_CLIPPED
-    elif choice == "2":
-        return OUT_COMPLETE
+        return OUT_RECLASSIFIED
     else:
         print("[ERROR] Invalid selection.")
         return None

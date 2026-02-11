@@ -11,7 +11,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "03_json_model"
-REPORT_DIR = PROJECT_ROOT / "outputs" / "04_val3dity"
+REPORT_DIR = PROJECT_ROOT / "outputs" / "03_val3dity"
 VAL3DITY_EXE = PROJECT_ROOT / "tools" / "val3dity" / "val3dity-win64" / "val3dity.exe"
 
 # Exit codes

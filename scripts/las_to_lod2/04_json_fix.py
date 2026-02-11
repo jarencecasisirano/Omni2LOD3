@@ -2,22 +2,27 @@
 """
 LOD2 CityJSON Geometry Fixer (PIPELINE-FRIENDLY)
 
-Fixes only:
-- 902 EMPTY_PRIMITIVE: removes geometry entries with empty boundaries []
+Fixes (report-driven):
+- 902 EMPTY_PRIMITIVE: removes geometry entries with empty boundaries
+- 102 CONSECUTIVE_POINTS_SAME: targeted cleanup only on val3dity-flagged faces
 
 Behavior:
 - Default INPUT dir:  <project_root>/data/03_json_model
 - Default OUTPUT dir: <project_root>/outputs/04_LOD2_json
+- Default REPORT dir: <project_root>/outputs/03_val3dity
 - Lists JSON files in INPUT dir and asks user which one to process (or ALL)
 - Writes: <stem>_FIXED.json into OUTPUT dir
 
 CLI mode:
-  python 04_json_fix.py <input_json> <output_json>
+  python 04_json_fix.py <input_json> <output_json> [--report <report_json>] [--tol 0.001]
 """
 
 import json
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.val3dity_102 import apply_102_fix_from_report
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -26,6 +31,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "03_json_model"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "04_LOD2_json"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "outputs" / "03_val3dity"
+DEFAULT_TOL = 0.001
 
 
 def _is_empty_boundaries(boundaries) -> bool:
@@ -34,6 +40,16 @@ def _is_empty_boundaries(boundaries) -> bool:
     if not isinstance(boundaries, (list, tuple)):
         return True
     return len(boundaries) == 0
+
+
+def _is_effectively_empty(node) -> bool:
+    if node is None:
+        return True
+    if isinstance(node, list):
+        if len(node) == 0:
+            return True
+        return all(_is_effectively_empty(child) for child in node)
+    return False
 
 
 def _extract_error_codes_from_node(node, out_codes: set):
@@ -54,17 +70,32 @@ def _extract_error_codes_from_node(node, out_codes: set):
 
 
 def _load_report_error_codes(report_json_path: Path):
-    if not report_json_path.exists():
-        raise FileNotFoundError(f"val3dity report not found: {report_json_path}")
-
-    try:
-        data = json.loads(report_json_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ValueError(f"Could not parse val3dity report JSON: {e}") from e
-
+    data = _load_report_json(report_json_path)
     codes = set()
     _extract_error_codes_from_node(data, codes)
     return codes
+
+
+def _load_report_json(report_json_path: Path):
+    if not report_json_path.exists():
+        raise FileNotFoundError(f"val3dity report not found: {report_json_path}")
+    try:
+        return json.loads(report_json_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ValueError(f"Could not parse val3dity report JSON: {e}") from e
+
+
+def _report_snap_tol(report_json: dict):
+    try:
+        tol = report_json.get("parameters", {}).get("snap_tol", None)
+        if tol is None:
+            return None
+        t = float(tol)
+        if t > 0:
+            return t
+    except Exception:
+        pass
+    return None
 
 
 def _default_report_path_for_input(input_path: Path):
@@ -89,8 +120,8 @@ def _fix_cityobject_geometries(cityobj: dict):
 
         boundaries = g.get("boundaries", None)
 
-        # 902: remove empty primitive
-        if _is_empty_boundaries(boundaries):
+        # 902: remove empty primitive (including nested empty after pruning)
+        if _is_empty_boundaries(boundaries) or _is_effectively_empty(boundaries):
             geometries_removed += 1
             continue
 
@@ -106,7 +137,7 @@ def _fix_cityobject_geometries(cityobj: dict):
     }
 
 
-def fix_cityjson_file(input_path: Path, output_path: Path, fix_902_enabled: bool):
+def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, tol_override=None):
     with input_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -114,8 +145,32 @@ def fix_cityjson_file(input_path: Path, output_path: Path, fix_902_enabled: bool
     if not isinstance(city_objects, dict):
         raise ValueError("Invalid CityJSON: CityObjects is not a dict")
 
+    codes = set()
+    _extract_error_codes_from_node(report_json, codes)
+    fix_902_enabled = 902 in codes
+    fix_102_enabled = 102 in codes
+
     objects_modified = 0
     geometries_removed = 0
+    fix102_stats = {
+        "targets_total": 0,
+        "targets_resolved": 0,
+        "targets_missing": 0,
+        "targets_unresolved": 0,
+        "objects_modified": 0,
+        "consecutive_removed": 0,
+        "rings_nudged": 0,
+        "new_vertices_added": 0,
+        "rings_dropped": 0,
+        "faces_dropped": 0,
+    }
+
+    tol = tol_override if tol_override is not None else _report_snap_tol(report_json)
+    if tol is None:
+        tol = DEFAULT_TOL
+
+    if fix_102_enabled:
+        fix102_stats = apply_102_fix_from_report(data, report_json, tol=tol)
 
     for _, obj in city_objects.items():
         if not isinstance(obj, dict):
@@ -139,6 +194,9 @@ def fix_cityjson_file(input_path: Path, output_path: Path, fix_902_enabled: bool
         "objects_modified": objects_modified,
         "geometries_removed": geometries_removed,
         "fix_902_enabled": fix_902_enabled,
+        "fix_102_enabled": fix_102_enabled,
+        "tol_used": tol,
+        "fix102": fix102_stats,
     }
 
 
@@ -158,24 +216,44 @@ def choose_index(n: int, prompt: str):
     return idx
 
 
+def _parse_cli_options(args):
+    report_path = None
+    tol_override = None
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--report":
+            if i + 1 >= len(args):
+                raise ValueError("Missing value for --report")
+            report_path = Path(args[i + 1])
+            i += 2
+            continue
+        if arg == "--tol":
+            if i + 1 >= len(args):
+                raise ValueError("Missing value for --tol")
+            tol_override = float(args[i + 1])
+            if tol_override <= 0:
+                raise ValueError("--tol must be > 0")
+            i += 2
+            continue
+        raise ValueError(f"Unknown argument: {arg}")
+
+    return report_path, tol_override
+
+
 def main():
     # CLI mode
     if len(sys.argv) >= 3:
         in_path = Path(sys.argv[1])
         out_path = Path(sys.argv[2])
-        report_path = _default_report_path_for_input(in_path)
-
-        if len(sys.argv) >= 5:
-            if sys.argv[3] == "--report":
-                report_path = Path(sys.argv[4])
-            else:
-                print("[ERROR] Unknown arguments.")
-                print("Usage: python 04_json_fix.py <input_json> <output_json> [--report <report_json>]")
-                sys.exit(1)
-        elif len(sys.argv) == 4:
-            print("[ERROR] Missing value for --report")
-            print("Usage: python 04_json_fix.py <input_json> <output_json> [--report <report_json>]")
+        try:
+            report_override, tol_override = _parse_cli_options(sys.argv[3:])
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            print("Usage: python 04_json_fix.py <input_json> <output_json> [--report <report_json>] [--tol 0.001]")
             sys.exit(1)
+        report_path = report_override if report_override else _default_report_path_for_input(in_path)
 
         print("\n" + "=" * 70)
         print("LOD2 CityJSON Geometry Fixer (CLI MODE)")
@@ -189,15 +267,14 @@ def main():
             sys.exit(1)
 
         try:
+            report_json = _load_report_json(report_path)
             codes = _load_report_error_codes(report_path)
         except Exception as e:
             print(f"[ERROR] Could not load val3dity report: {e}")
             sys.exit(1)
 
-        fix_902_enabled = 902 in codes
-
         try:
-            stats = fix_cityjson_file(in_path, out_path, fix_902_enabled=fix_902_enabled)
+            stats = fix_cityjson_file(in_path, out_path, report_json=report_json, tol_override=tol_override)
         except Exception as e:
             print(f"[ERROR] Fix failed: {e}")
             sys.exit(1)
@@ -205,9 +282,17 @@ def main():
         codes_txt = ", ".join(str(c) for c in sorted(codes)) if codes else "none"
         print("Done.")
         print(f"  val3dity codes found:      {codes_txt}")
-        print(f"  Applied fix 902:           {'yes' if fix_902_enabled else 'no'}")
+        print(f"  Applied fix 902:           {'yes' if stats['fix_902_enabled'] else 'no'}")
+        print(f"  Applied fix 102:           {'yes' if stats['fix_102_enabled'] else 'no'}")
+        print(f"  Snap tol used for 102:     {stats['tol_used']}")
         print(f"  Objects modified:         {stats['objects_modified']}")
         print(f"  Empty geometries removed: {stats['geometries_removed']}")
+        print(f"  102 targets resolved:      {stats['fix102']['targets_resolved']}/{stats['fix102']['targets_total']}")
+        print(f"  102 targets unresolved:    {stats['fix102']['targets_unresolved']}")
+        print(f"  102 consecutive removed:   {stats['fix102']['consecutive_removed']}")
+        print(f"  102 rings nudged:          {stats['fix102']['rings_nudged']}")
+        print(f"  102 new vertices added:    {stats['fix102']['new_vertices_added']}")
+        print(f"  102 faces dropped:         {stats['fix102']['faces_dropped']} (expected 0)")
         print("=" * 70 + "\n")
         return
 
@@ -247,6 +332,13 @@ def main():
     totals = {
         "objects_modified": 0,
         "geometries_removed": 0,
+        "targets_total": 0,
+        "targets_resolved": 0,
+        "targets_unresolved": 0,
+        "consecutive_removed": 0,
+        "rings_nudged": 0,
+        "new_vertices_added": 0,
+        "faces_dropped": 0,
     }
 
     for p in targets:
@@ -258,28 +350,43 @@ def main():
         print(f"  Using report: {report_path.name}")
 
         try:
+            report_json = _load_report_json(report_path)
             codes = _load_report_error_codes(report_path)
         except Exception as e:
             print(f"[ERROR] Missing/invalid report for {p.name}: {e}")
             continue
 
-        fix_902_enabled = 902 in codes
         try:
-            stats = fix_cityjson_file(p, out_path, fix_902_enabled=fix_902_enabled)
+            stats = fix_cityjson_file(p, out_path, report_json=report_json, tol_override=None)
         except Exception as e:
             print(f"[ERROR] Failed on {p.name}: {e}")
             continue
 
-        for k in totals:
-            totals[k] += stats[k]
+        totals["objects_modified"] += stats["objects_modified"]
+        totals["geometries_removed"] += stats["geometries_removed"]
+        totals["targets_total"] += stats["fix102"]["targets_total"]
+        totals["targets_resolved"] += stats["fix102"]["targets_resolved"]
+        totals["targets_unresolved"] += stats["fix102"]["targets_unresolved"]
+        totals["consecutive_removed"] += stats["fix102"]["consecutive_removed"]
+        totals["rings_nudged"] += stats["fix102"]["rings_nudged"]
+        totals["new_vertices_added"] += stats["fix102"]["new_vertices_added"]
+        totals["faces_dropped"] += stats["fix102"]["faces_dropped"]
 
         print(f"  Saved to: {out_path}")
         print("  Summary:")
         codes_txt = ", ".join(str(c) for c in sorted(codes)) if codes else "none"
         print(f"     val3dity codes found:      {codes_txt}")
-        print(f"     Applied fix 902:           {'yes' if fix_902_enabled else 'no'}")
+        print(f"     Applied fix 902:           {'yes' if stats['fix_902_enabled'] else 'no'}")
+        print(f"     Applied fix 102:           {'yes' if stats['fix_102_enabled'] else 'no'}")
+        print(f"     Snap tol used for 102:     {stats['tol_used']}")
         print(f"     Objects modified:         {stats['objects_modified']}")
         print(f"     Empty geometries removed: {stats['geometries_removed']}")
+        print(f"     102 targets resolved:      {stats['fix102']['targets_resolved']}/{stats['fix102']['targets_total']}")
+        print(f"     102 targets unresolved:    {stats['fix102']['targets_unresolved']}")
+        print(f"     102 consecutive removed:   {stats['fix102']['consecutive_removed']}")
+        print(f"     102 rings nudged:          {stats['fix102']['rings_nudged']}")
+        print(f"     102 new vertices added:    {stats['fix102']['new_vertices_added']}")
+        print(f"     102 faces dropped:         {stats['fix102']['faces_dropped']} (expected 0)")
 
     print("\n" + "=" * 70)
     print("PROCESSING SUMMARY")
@@ -287,6 +394,12 @@ def main():
     print(f"Files processed:          {len(targets)}/{len(targets)}")
     print(f"Objects modified:         {totals['objects_modified']}")
     print(f"Empty geometries removed: {totals['geometries_removed']}")
+    print(f"102 targets resolved:      {totals['targets_resolved']}/{totals['targets_total']}")
+    print(f"102 targets unresolved:    {totals['targets_unresolved']}")
+    print(f"102 consecutive removed:   {totals['consecutive_removed']}")
+    print(f"102 rings nudged:          {totals['rings_nudged']}")
+    print(f"102 new vertices added:    {totals['new_vertices_added']}")
+    print(f"102 faces dropped:         {totals['faces_dropped']} (expected 0)")
     print("=" * 70)
     print(f"Check: {output_dir}")
     print("Done.\n")

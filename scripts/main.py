@@ -359,7 +359,7 @@ def step_json_to_gml(input_json=None):
 
 def step_validate_then_fix():
     MAX_FIX_PASSES = 5
-    FIXABLE_CODES = {902}
+    FIXABLE_CODES = {102, 902}
 
     json_files = list_json_files(DATA_JSON_DIR)
     if not json_files:

@@ -5,6 +5,7 @@ import glob
 import json
 import hashlib
 import subprocess
+from pathlib import Path
 
 # ============================================================
 # Project paths (AUTO — no hardcoded C:\ paths)
@@ -19,16 +20,15 @@ DATA_JSON_DIR = os.path.join(PROJECT_ROOT, "data", "03_json_model")
 
 OUT_INFO       = os.path.join(PROJECT_ROOT, "outputs", "00_las_info")
 OUT_DOWNSAMPLED= os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
-OUT_CLIPPED    = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
+OUT_RECLASSIFIED = os.path.join(PROJECT_ROOT, "outputs", "02_reclassified")
 OUT_COMPLETE   = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
 OUT_VAL3DITY   = os.path.join(PROJECT_ROOT, "outputs", "04_val3dity")
 OUT_LOD2_JSON  = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_json")
 OUT_LOD2_GML   = os.path.join(PROJECT_ROOT, "outputs", "06_LOD2_gml")
 
-SCRIPT_CLEAN    = os.path.join(SCRIPT_DIR, "las_to_lod2", "02b_cleanup_building_heights.py")
 SCRIPT_INSPECT  = os.path.join(SCRIPT_DIR, "las_to_lod2", "inspect_las.py")
 SCRIPT_DOWN     = os.path.join(SCRIPT_DIR, "las_to_lod2", "01_downsampling.py")
-SCRIPT_CLIP     = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_clip_z.py")
+SCRIPT_ASSIGN   = os.path.join(SCRIPT_DIR, "las_to_lod2", "02_reclassify.py")
 SCRIPT_GEN      = os.path.join(SCRIPT_DIR, "las_to_lod2", "03_generate_facade_points.py")
 SCRIPT_VALIDATE = os.path.join(SCRIPT_DIR, "las_to_lod2", "04_validate_val3dity.py")
 SCRIPT_FIX      = os.path.join(SCRIPT_DIR, "las_to_lod2", "05_json_fix.py")
@@ -44,7 +44,7 @@ def ensure_dirs():
     for d in (
         OUT_INFO,
         OUT_DOWNSAMPLED,
-        OUT_CLIPPED,
+        OUT_RECLASSIFIED,
         OUT_COMPLETE,
         OUT_VAL3DITY,
         OUT_LOD2_JSON,
@@ -85,9 +85,9 @@ def strip_suffix(name, suffixes):
             return name[: -len(s)]
     return name
 
-def get_latest_cleaned_las():
+def get_latest_reclassified_las():
     files = sorted(
-        glob.glob(os.path.join(OUT_CLIPPED, "*_cleaned.las")),
+        glob.glob(os.path.join(OUT_RECLASSIFIED, "*_reclassified.las")),
         key=os.path.getmtime
     )
     return files[-1] if files else None
@@ -95,7 +95,7 @@ def get_latest_cleaned_las():
 def extract_prefix(file_path):
     """
     Prefix heuristic: take first token before '_' from filename.
-    NEC_112025_05_clipped_cleaned.las -> NEC
+    NEC_112025_05_reclassified.las -> NEC
     nimbb_020626_fixed.json -> nimbb
     """
     base = os.path.splitext(os.path.basename(file_path))[0]
@@ -148,20 +148,18 @@ def detect_las_crs(las_path):
     except Exception:
         return None
 
-def auto_select_footprint_for_las(las_path):
+def matching_footprints_for_las(las_path):
     """
-    Try to pick a footprint shapefile automatically using LAS prefix.
+    Return footprint shapefiles whose basename matches LAS prefix.
 
     Rules:
     - Match prefix token (case-insensitive) against shapefile basename.
       e.g. prefix 'NEC' matches 'NEC_footprint_1.shp' or 'nec_fp.shp'
-    - If exactly one match: return it (auto)
-    - If multiple matches: prompt user among matches
-    - If none: return None
+    - Prefer strict startswith(prefix + "_") matches when present.
     """
     shp_files = list_shp_files(DATA_SHP_DIR)
     if not shp_files:
-        return None
+        return []
 
     prefix = extract_prefix(las_path).lower()
 
@@ -176,13 +174,16 @@ def auto_select_footprint_for_las(las_path):
     if strict:
         matches = strict
 
+    return matches
+
+def choose_matching_footprint_for_las(las_path, purpose):
+    matches = matching_footprints_for_las(las_path)
+    prefix = extract_prefix(las_path).upper()
     if len(matches) == 1:
-        print(f"\n[Auto] Using footprint: {os.path.basename(matches[0])} (matched prefix '{prefix.upper()}')")
+        print(f"\n[Auto] Using footprint: {os.path.basename(matches[0])} (matched prefix '{prefix}')")
         return matches[0]
-
     if len(matches) > 1:
-        return choose_file(matches, f"Multiple footprints match '{prefix.upper()}'. Select footprint SHP:")
-
+        return choose_file(matches, f"Multiple footprints match '{prefix}'. Select footprint SHP for {purpose}:")
     return None
 
 def tell_user_digitize_footprint(las_path):
@@ -212,14 +213,14 @@ def pick_visualize_las():
     if choice == "2":
         print(f"\nSelect outputs subfolder:")
         print("[0] Downsampled")
-        print("[1] Clipped")
+        print("[1] Reclassified")
         print("[2] Complete point cloud")
         sub = input("Enter index: ").strip()
 
         if sub == "0":
             folder = OUT_DOWNSAMPLED
         elif sub == "1":
-            folder = OUT_CLIPPED
+            folder = OUT_RECLASSIFIED
         elif sub == "2":
             folder = OUT_COMPLETE
         else:
@@ -265,87 +266,64 @@ def step_downsample():
 
     return output_las
 
-def step_clip(input_las=None):
+def step_assign_building_class(input_las=None):
     if input_las is None:
         files = list_las_files(OUT_DOWNSAMPLED)
-        input_las = choose_file(files, "Select downsampled LAS to clip:")
+        input_las = choose_file(files, "Select downsampled LAS to reassign by footprint:")
         if not input_las:
             return None
 
     base = os.path.splitext(os.path.basename(input_las))[0]
     base = strip_suffix(base, ["_downsampled"])
-    output_las = os.path.join(OUT_CLIPPED, f"{base}_clipped.las")
+    output_las = os.path.join(OUT_RECLASSIFIED, f"{base}_reclassified.las")
 
-    print("\n=== Running Z clipping ===")
+    print("\n=== Running building class reassignment by footprint ===")
     print(f"Input:  {input_las}")
     print(f"Output: {output_las}")
 
-    result = subprocess.run([sys.executable, SCRIPT_CLIP, input_las, output_las])
-    if result.returncode != 0:
-        print("[ERROR] Clipping failed.")
-        return None
-
-    # Run building-aware cleanup right after clip_z
-    cleaned_las = os.path.join(OUT_CLIPPED, f"{base}_clipped_cleaned.las")
-
-    print("\n=== Running building height cleanup ===")
-    print(f"Input:  {output_las}")
-    print(f"Output: {cleaned_las}")
-
-    # Auto-pick footprint based on LAS prefix; fallback to prompt
-    footprint = auto_select_footprint_for_las(output_las)
+    footprint = choose_matching_footprint_for_las(input_las, "reassignment")
     if not footprint:
-        # If no match, let user choose ANY if available, else instruct digitize
-        all_shps = list_shp_files(DATA_SHP_DIR)
-        if all_shps:
-            footprint = choose_file(all_shps, "No obvious footprint match. Select footprint SHP for cleanup:")
-        else:
-            tell_user_digitize_footprint(output_las)
-            return None
-
-    result2 = subprocess.run([sys.executable, SCRIPT_CLEAN, output_las, footprint, cleaned_las])
-    if result2.returncode != 0:
-        print("[ERROR] Building cleanup failed.")
+        tell_user_digitize_footprint(input_las)
         return None
 
-    if not os.path.exists(cleaned_las):
-        print(f"[ERROR] Cleaned LAS was not created: {cleaned_las}")
+    result = subprocess.run([sys.executable, SCRIPT_ASSIGN, input_las, footprint, output_las])
+    if result.returncode != 0:
+        print("[ERROR] Building class reassignment failed.")
         return None
 
-    return cleaned_las
+    if not os.path.exists(output_las):
+        print(f"[ERROR] Reclassified LAS was not created: {output_las}")
+        return None
+
+    return output_las
 
 def step_generate(input_las=None, prompt_for_las=False):
     """
     Behavior:
-    - If prompt_for_las=True, ALWAYS ask user to choose LAS from outputs/02_clipped (non-copc).
+    - If prompt_for_las=True, ALWAYS ask user to choose LAS from outputs/02_reclassified (non-copc).
       This is for menu choice [3].
     - If prompt_for_las=False, we expect caller (choice [2] or [1]) to pass input_las.
-      If it's missing, fall back to latest cleaned.
+      If it's missing, fall back to latest reclassified output.
     """
     if prompt_for_las:
-        las_files = list_las_files(OUT_CLIPPED)
-        input_las = choose_file(las_files, "Select LAS in outputs/02_clipped to generate facades:")
+        las_files = list_las_files(OUT_RECLASSIFIED)
+        input_las = choose_file(las_files, "Select LAS in outputs/02_reclassified to generate facades:")
         if not input_las:
             return None
     else:
         if input_las is None:
-            input_las = get_latest_cleaned_las()
+            input_las = get_latest_reclassified_las()
             if not input_las:
-                print("[ERROR] No *_cleaned.las found in 02_clipped.")
+                print("[ERROR] No *_reclassified.las found in 02_reclassified.")
                 return None
 
-    # Auto-pick footprint based on LAS prefix; fallback to prompt
-    footprint_shp = auto_select_footprint_for_las(input_las)
+    footprint_shp = choose_matching_footprint_for_las(input_las, "facade generation")
     if not footprint_shp:
-        all_shps = list_shp_files(DATA_SHP_DIR)
-        if all_shps:
-            footprint_shp = choose_file(all_shps, "No obvious footprint match. Select footprint SHP (used for facade):")
-        else:
-            tell_user_digitize_footprint(input_las)
-            return None
+        tell_user_digitize_footprint(input_las)
+        return None
 
     base = os.path.splitext(os.path.basename(input_las))[0]
-    base = strip_suffix(base, ["_clipped_cleaned", "_clipped"])
+    base = strip_suffix(base, ["_reclassified", "_downsampled"])
     output_las = os.path.join(OUT_COMPLETE, f"{base}_facade.las")
 
     print("\n=== Generating facade points ===")
@@ -509,7 +487,7 @@ def main():
     print("Which part of the pipeline would you like to start with?")
     print("[0] Inspect point cloud")
     print("[1] Voxel downsample")
-    print("[2] Clip Z outliers")
+    print("[2] Reclassify Point Cloud")
     print("[3] Generate facade points")
     print("[4] Validate (then fix if invalid)")
     print("[5] Post-process CityJSON file")
@@ -532,12 +510,12 @@ def main():
     elif choice == "1":
         out = step_downsample()
         if out:
-            out = step_clip(out)
+            out = step_assign_building_class(out)
         if out:
             step_generate(out, prompt_for_las=False)
 
     elif choice == "2":
-        out = step_clip()
+        out = step_assign_building_class()
         if out:
             step_generate(out, prompt_for_las=False)
 

@@ -294,7 +294,7 @@ def step_assign_building_class(input_las=None):
     print("Next:")
     print(f"  1) Run CityForge using: {output_las}")
     print(f"  2) Save/export the resulting CityJSON into: {DATA_JSON_DIR}")
-    print("  3) Then run menu option [4] (Post-process CityJSON) and [5] (Convert to CityGML 2.0)")
+    print("  3) Then run menu option [3] (Validate + fix if invalid), then [4] (Convert to CityGML 2.0)")
     print("======================================================================\n")
 
     return output_las
@@ -359,7 +359,7 @@ def step_json_to_gml(input_json=None):
 
 def step_validate_then_fix():
     MAX_FIX_PASSES = 5
-    FIXABLE_CODES = {102, 902}
+    FIXABLE_CODES = {902}
 
     json_files = list_json_files(DATA_JSON_DIR)
     if not json_files:
@@ -440,9 +440,8 @@ def main():
     print("[0] Inspect point cloud")
     print("[1] Voxel downsample")
     print("[2] Reclassify Point Cloud")
-    print("[3] Validate (then fix if invalid)")
-    print("[4] Post-process CityJSON file")
-    print("[5] Convert CityJSON to CityGML 2.0")
+    print("[3] Validate (then fix JSON file if invalid)")
+    print("[4] Convert CityJSON to CityGML 2.0")
     print("[V] Visualize point cloud")
     print("[Q] Quit")
 
@@ -470,9 +469,6 @@ def main():
         step_validate_then_fix()
 
     elif choice == "4":
-        step_fix_cityjson()
-
-    elif choice == "5":
         step_json_to_gml()
 
     elif choice == "v":

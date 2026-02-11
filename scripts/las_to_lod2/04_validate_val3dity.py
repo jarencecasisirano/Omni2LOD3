@@ -1,3 +1,4 @@
+import json
 import re
 import sys
 import subprocess
@@ -48,6 +49,35 @@ def _parse_validity(output_text: str):
     return EXIT_FAILURE
 
 
+def _summarize_report_json(report_path: Path):
+    """
+    Best-effort summary from val3dity JSON report.
+    Returns dict with 'codes' list (may be empty) and 'note'.
+    """
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"codes": [], "note": f"[WARN] Could not parse JSON report: {e}"}
+
+    codes = {}
+
+    def walk(node, key_hint=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                kh = f"{key_hint}.{k}" if key_hint else k
+                if isinstance(v, int) and ("error" in k.lower() or "code" in k.lower()):
+                    codes[v] = codes.get(v, 0) + 1
+                else:
+                    walk(v, kh)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, key_hint)
+
+    walk(data)
+
+    return {"codes": sorted(codes.items()), "note": ""}
+
+
 def run_val3dity(input_path: Path):
     if not VAL3DITY_EXE.exists():
         print(f"[ERROR] val3dity.exe not found: {VAL3DITY_EXE}")
@@ -57,23 +87,25 @@ def run_val3dity(input_path: Path):
         print(f"[ERROR] Input JSON not found: {input_path}")
         return EXIT_FAILURE, None
 
-    cmd = [str(VAL3DITY_EXE), str(input_path)]
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report_txt_path = REPORT_DIR / f"{input_path.stem}_val3dity.txt"
+    report_json_path = REPORT_DIR / f"{input_path.stem}_val3dity.json"
+
+    cmd = [str(VAL3DITY_EXE), str(input_path), "--report", str(report_json_path)]
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     combined = stdout if not stderr else (stdout + "\n" + stderr)
 
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = REPORT_DIR / f"{input_path.stem}_val3dity.txt"
-    report_path.write_text(combined, encoding="utf-8")
+    report_txt_path.write_text(combined, encoding="utf-8")
 
     if result.returncode != 0:
         print(f"[ERROR] val3dity failed with exit code {result.returncode}")
-        return EXIT_FAILURE, report_path
+        return EXIT_FAILURE, report_txt_path, report_json_path
 
     status = _parse_validity(combined)
-    return status, report_path
+    return status, report_txt_path, report_json_path
 
 
 def main():
@@ -83,9 +115,17 @@ def main():
         print("\n=== val3dity validation (CLI MODE) ===")
         print(f"Input:  {in_path}")
 
-        status, report_path = run_val3dity(in_path)
-        if report_path:
-            print(f"Report: {report_path}")
+        status, report_txt_path, report_json_path = run_val3dity(in_path)
+        if report_txt_path:
+            print(f"Report (text): {report_txt_path}")
+        if report_json_path and report_json_path.exists():
+            print(f"Report (json): {report_json_path}")
+            summary = _summarize_report_json(report_json_path)
+            if summary["note"]:
+                print(summary["note"])
+            if summary["codes"]:
+                codes = ", ".join([f"{c} (x{n})" for c, n in summary["codes"]])
+                print(f"JSON codes: {codes}")
 
         if status == EXIT_VALID:
             print("Result: VALID")
@@ -116,9 +156,17 @@ def main():
         sys.exit(EXIT_FAILURE)
 
     in_path = files[idx]
-    status, report_path = run_val3dity(in_path)
-    if report_path:
-        print(f"Report: {report_path}")
+    status, report_txt_path, report_json_path = run_val3dity(in_path)
+    if report_txt_path:
+        print(f"Report (text): {report_txt_path}")
+    if report_json_path and report_json_path.exists():
+        print(f"Report (json): {report_json_path}")
+        summary = _summarize_report_json(report_json_path)
+        if summary["note"]:
+            print(summary["note"])
+        if summary["codes"]:
+            codes = ", ".join([f"{c} (x{n})" for c, n in summary["codes"]])
+            print(f"JSON codes: {codes}")
 
     if status == EXIT_VALID:
         print("Result: VALID")

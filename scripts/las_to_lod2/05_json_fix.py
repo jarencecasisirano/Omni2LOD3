@@ -10,7 +10,7 @@ Fixes:
 
 Behavior:
 - Default INPUT dir:  <project_root>/data/03_json_model
-- Default OUTPUT dir: <project_root>/outputs/04_LOD2_json
+- Default OUTPUT dir: <project_root>/outputs/05_LOD2_json
 - Lists JSON files in INPUT dir and asks user which one to process (or ALL)
 - Writes: <stem>_FIXED.json into OUTPUT dir
 
@@ -30,7 +30,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = PROJECT_ROOT.parent
 
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "03_json_model"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "04_LOD2_json"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "05_LOD2_json"
 
 # -------------------------
 # Helpers

@@ -2,6 +2,8 @@
 import os
 import sys
 import glob
+import json
+import hashlib
 import subprocess
 
 # ============================================================
@@ -19,9 +21,8 @@ OUT_INFO       = os.path.join(PROJECT_ROOT, "outputs", "00_las_info")
 OUT_DOWNSAMPLED= os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
 OUT_CLIPPED    = os.path.join(PROJECT_ROOT, "outputs", "02_clipped")
 OUT_COMPLETE   = os.path.join(PROJECT_ROOT, "outputs", "03_complete_las")
-OUT_LOD2_JSON  = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
 OUT_VAL3DITY   = os.path.join(PROJECT_ROOT, "outputs", "04_val3dity")
-OUT_LOD2_JSON_FIXED = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_json")
+OUT_LOD2_JSON  = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_json")
 OUT_LOD2_GML   = os.path.join(PROJECT_ROOT, "outputs", "06_LOD2_gml")
 
 SCRIPT_CLEAN    = os.path.join(SCRIPT_DIR, "las_to_lod2", "02b_cleanup_building_heights.py")
@@ -45,9 +46,8 @@ def ensure_dirs():
         OUT_DOWNSAMPLED,
         OUT_CLIPPED,
         OUT_COMPLETE,
-        OUT_LOD2_JSON,
         OUT_VAL3DITY,
-        OUT_LOD2_JSON_FIXED,
+        OUT_LOD2_JSON,
         OUT_LOD2_GML,
     ):
         os.makedirs(d, exist_ok=True)
@@ -102,6 +102,38 @@ def extract_prefix(file_path):
     if "_" in base:
         return base.split("_")[0]
     return base
+
+def file_hash(path):
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def parse_val3dity_codes(report_json_path):
+    if not os.path.exists(report_json_path):
+        return []
+    try:
+        with open(report_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+
+    codes = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(v, int) and ("error" in k.lower() or "code" in k.lower()):
+                    codes[v] = codes.get(v, 0) + 1
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return sorted(codes.keys())
 
 def detect_las_crs(las_path):
     """
@@ -367,17 +399,12 @@ def step_fix_cityjson():
 
 def step_json_to_gml(input_json=None):
     if input_json is None:
-        json_files = list_json_files(OUT_LOD2_JSON_FIXED)
-        source_dir = OUT_LOD2_JSON_FIXED
+        json_files = list_json_files(OUT_LOD2_JSON)
         if not json_files:
-            json_files = list_json_files(OUT_LOD2_JSON)
-            source_dir = OUT_LOD2_JSON
-
-        if not json_files:
-            print(f"[ERROR] No fixed CityJSON files found in: {OUT_LOD2_JSON_FIXED} or {OUT_LOD2_JSON}")
+            print(f"[ERROR] No fixed CityJSON files found in: {OUT_LOD2_JSON}")
             return None
 
-        input_json = choose_file(json_files, f"Select fixed CityJSON to convert to CityGML ({os.path.basename(source_dir)}):")
+        input_json = choose_file(json_files, f"Select fixed CityJSON to convert to CityGML ({os.path.basename(OUT_LOD2_JSON)}):")
         if not input_json:
             return None
 
@@ -401,6 +428,9 @@ def step_json_to_gml(input_json=None):
 
 
 def step_validate_then_fix():
+    MAX_FIX_PASSES = 5
+    FIXABLE_CODES = {102, 902}
+
     json_files = list_json_files(DATA_JSON_DIR)
     if not json_files:
         print(f"[ERROR] No CityJSON files found in: {DATA_JSON_DIR}")
@@ -410,29 +440,46 @@ def step_validate_then_fix():
     if not input_json:
         return None
 
-    print("\n=== Running val3dity validation ===")
-    result = subprocess.run([sys.executable, SCRIPT_VALIDATE, input_json])
+    current_json = input_json
+    base = os.path.splitext(os.path.basename(input_json))[0]
+    output_json = os.path.join(OUT_LOD2_JSON, f"{base}_FIXED.json")
 
-    if result.returncode == 1:
-        print("[ERROR] Validation failed.")
-        return None
+    for i in range(MAX_FIX_PASSES + 1):
+        print("\n=== Running val3dity validation ===")
+        result = subprocess.run([sys.executable, SCRIPT_VALIDATE, current_json])
 
-    if result.returncode == 0:
-        print("[OK] CityJSON is valid.")
-        step_json_to_gml(input_json)
-        return input_json
+        if result.returncode == 1:
+            print("[ERROR] Validation failed.")
+            return None
 
-    if result.returncode == 2:
+        if result.returncode == 0:
+            print("[OK] CityJSON is valid.")
+            step_json_to_gml(current_json)
+            return current_json
+
+        if result.returncode != 2:
+            print("[ERROR] Unexpected validation exit code.")
+            return None
+
+        report_json = os.path.join(OUT_VAL3DITY, f"{Path(current_json).stem}_val3dity.json")
+        codes = parse_val3dity_codes(report_json)
+        if codes and not any(c in FIXABLE_CODES for c in codes):
+            print(f"[WARN] No fixable error codes found: {codes}")
+            return None
+
+        if i == MAX_FIX_PASSES:
+            print("[WARN] Reached max fix passes without a valid file.")
+            return None
+
         print("[WARN] CityJSON is invalid. Running fix...")
 
-        base = os.path.splitext(os.path.basename(input_json))[0]
-        output_json = os.path.join(OUT_LOD2_JSON_FIXED, f"{base}_FIXED.json")
+        pre_hash = file_hash(current_json)
 
         print("\n=== Running CityJSON fix ===")
-        print(f"Input:  {input_json}")
+        print(f"Input:  {current_json}")
         print(f"Output: {output_json}")
 
-        result_fix = subprocess.run([sys.executable, SCRIPT_FIX, input_json, output_json])
+        result_fix = subprocess.run([sys.executable, SCRIPT_FIX, current_json, output_json])
         if result_fix.returncode != 0:
             print("[ERROR] CityJSON fix failed.")
             return None
@@ -441,19 +488,13 @@ def step_validate_then_fix():
             print(f"[ERROR] Expected output not created: {output_json}")
             return None
 
-        print("\n=== Re-running val3dity on fixed file ===")
-        result2 = subprocess.run([sys.executable, SCRIPT_VALIDATE, output_json])
-        if result2.returncode == 0:
-            print("[OK] Fixed CityJSON is valid.")
-            step_json_to_gml(output_json)
-            return output_json
-        if result2.returncode == 2:
-            print("[WARN] Fixed CityJSON is still invalid.")
+        post_hash = file_hash(output_json)
+        if pre_hash == post_hash:
+            print("[WARN] Fix produced no changes. Stopping.")
             return None
-        print("[ERROR] Validation failed on fixed file.")
-        return None
 
-    print("[ERROR] Unexpected validation exit code.")
+        current_json = output_json
+
     return None
 
 

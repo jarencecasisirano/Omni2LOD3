@@ -29,7 +29,7 @@ NAMESPACES = {
 }
 
 # Default directories
-DEFAULT_GML_DIR = 'data/lod_2'
+DEFAULT_GML_DIR = 'outputs/00_gml_wall_merged'  # Use merged GML files
 DEFAULT_POINTCLOUD_BASE_DIR = 'outputs/04_manual_cleaned_point_clouds'
 
 
@@ -153,6 +153,7 @@ class WallSurface:
         self.coordinates = coordinates  # Nx3 array of vertices
         self.bbox_min = np.min(coordinates, axis=0)
         self.bbox_max = np.max(coordinates, axis=0)
+        self._normal = None
         
     def to_pointcloud(self, density: float = 0.1) -> o3d.geometry.PointCloud:
         """Convert wall surface to point cloud by sampling the polygon surface."""
@@ -186,6 +187,83 @@ class WallSurface:
         """Get the dimensions (width, height, depth) of the wall surface."""
         dims = self.bbox_max - self.bbox_min
         return tuple(dims)
+    
+    def get_normal(self) -> np.ndarray:
+        """Calculate and return the surface normal vector."""
+        if self._normal is not None:
+            return self._normal
+        
+        if len(self.coordinates) < 3:
+            return np.array([0, 0, 1])
+        
+        # Use first three vertices to compute normal via cross product
+        v1 = self.coordinates[1] - self.coordinates[0]
+        v2 = self.coordinates[2] - self.coordinates[0]
+        normal = np.cross(v1, v2)
+        
+        # Normalize
+        norm = np.linalg.norm(normal)
+        if norm > 1e-6:
+            normal = normal / norm
+        else:
+            normal = np.array([0, 0, 1])
+        
+        self._normal = normal
+        return normal
+    
+    def is_adjacent(self, other: 'WallSurface', distance_threshold: float = 1.0) -> bool:
+        """Check if another wall surface is spatially adjacent."""
+        # Check if bounding boxes are close
+        center1 = self.get_center()
+        center2 = other.get_center()
+        distance = np.linalg.norm(center1 - center2)
+        
+        # Consider adjacent if centers are within distance threshold
+        # or if bounding boxes overlap/touch
+        if distance > distance_threshold * 10:  # Quick rejection
+            return False
+        
+        # Check for any shared vertices
+        for v1 in self.coordinates:
+            for v2 in other.coordinates:
+                if np.linalg.norm(v1 - v2) < 0.01:  # Same vertex
+                    return True
+        
+        return False
+    
+    def is_coplanar(self, other: 'WallSurface', plane_distance_threshold: float = 0.5) -> bool:
+        """
+        Check if another wall surface is coplanar (on the same plane).
+        This allows merging surfaces at different heights on the same facade.
+        
+        Args:
+            other: Another WallSurface to compare
+            plane_distance_threshold: Maximum distance from plane to be considered coplanar
+            
+        Returns:
+            True if surfaces are on the same plane
+        """
+        # Get normals
+        normal1 = self.get_normal()
+        normal2 = other.get_normal()
+        
+        # Normals should already be similar (checked by caller)
+        # Now check if they're on the same plane
+        
+        # Define plane using this surface: normal · (point - point_on_plane) = 0
+        point_on_plane1 = self.coordinates[0]
+        
+        # Check distances of all points in other surface to this plane
+        distances = []
+        for point in other.coordinates:
+            # Distance from point to plane
+            d = abs(np.dot(normal1, point - point_on_plane1))
+            distances.append(d)
+        
+        max_distance = max(distances)
+        
+        # If all points are close to the plane, surfaces are coplanar
+        return max_distance < plane_distance_threshold
 
 
 def parse_gml_wallsurfaces(gml_file: str) -> List[WallSurface]:
@@ -236,6 +314,138 @@ def parse_gml_wallsurfaces(gml_file: str) -> List[WallSurface]:
                       f"dims={wall_surface.get_dimensions()}")
     
     return wall_surfaces
+
+
+def merge_wall_surfaces(wall_surfaces: List[WallSurface], 
+                        normal_angle_threshold: float = 5.0,
+                        distance_threshold: float = 2.0) -> List[WallSurface]:
+    """
+    Merge adjacent wall surfaces with similar normals.
+    
+    Args:
+        wall_surfaces: List of WallSurface objects
+        normal_angle_threshold: Maximum angle difference in degrees for normals to be considered similar
+        distance_threshold: Maximum distance for surfaces to be considered adjacent
+        
+    Returns:
+        List of merged WallSurface objects
+    """
+    print(f"\nMerging wall surfaces...")
+    print(f"  Initial count: {len(wall_surfaces)}")
+    print(f"  Normal angle threshold: {normal_angle_threshold}°")
+    print(f"  Distance threshold: {distance_threshold}m")
+    
+    if len(wall_surfaces) == 0:
+        return []
+    
+    # Convert angle threshold to radians for dot product comparison
+    angle_threshold_rad = np.radians(normal_angle_threshold)
+    cos_threshold = np.cos(angle_threshold_rad)
+    
+    # Track which surfaces have been merged
+    merged_flags = [False] * len(wall_surfaces)
+    merged_surfaces = []
+    
+    for i, wall in enumerate(wall_surfaces):
+        if merged_flags[i]:
+            continue
+        
+        # Start a new group with this surface
+        group = [i]
+        group_normal = wall.get_normal()
+        merged_flags[i] = True
+        
+        # Find all adjacent surfaces with similar normals
+        changed = True
+        while changed:
+            changed = False
+            for j in range(len(wall_surfaces)):
+                if merged_flags[j]:
+                    continue
+                
+                other_wall = wall_surfaces[j]
+                other_normal = other_wall.get_normal()
+                
+                # Check normal similarity
+                dot_product = np.dot(group_normal, other_normal)
+                normals_similar = abs(dot_product) >= cos_threshold
+                
+                if not normals_similar:
+                    continue
+                
+                # Check if adjacent (shared vertices) OR coplanar (same facade)
+                is_adjacent_to_group = False
+                for group_idx in group:
+                    group_surface = wall_surfaces[group_idx]
+                    # Check traditional adjacency (shared vertices)
+                    if group_surface.is_adjacent(other_wall, distance_threshold):
+                        is_adjacent_to_group = True
+                        break
+                    # Also check if coplanar (allows merging at different heights)
+                    if group_surface.is_coplanar(other_wall, plane_distance_threshold=0.5):
+                        is_adjacent_to_group = True
+                        break
+                
+                if is_adjacent_to_group:
+                    group.append(j)
+                    merged_flags[j] = True
+                    changed = True
+        
+        # Create merged surface from group
+        if len(group) == 1:
+            # No merging needed
+            merged_surfaces.append(wall_surfaces[group[0]])
+        else:
+            # Merge multiple surfaces
+            all_vertices = []
+            merged_ids = []
+            
+            for idx in group:
+                all_vertices.append(wall_surfaces[idx].coordinates)
+                merged_ids.append(wall_surfaces[idx].id)
+            
+            # Combine all vertices
+            combined_vertices = np.vstack(all_vertices)
+            
+            # Compute convex hull to get outer boundary
+            from scipy.spatial import ConvexHull
+            try:
+                # Project to 2D for convex hull (use first 2 principal components)
+                centroid = np.mean(combined_vertices, axis=0)
+                centered = combined_vertices - centroid
+                
+                # Use PCA to find best 2D projection plane
+                cov = np.cov(centered.T)
+                eigenvalues, eigenvectors = np.linalg.eig(cov)
+                # Sort by eigenvalue
+                idx = eigenvalues.argsort()[::-1]
+                eigenvectors = eigenvectors[:, idx]
+                
+                # Project to 2D using first two eigenvectors
+                projected_2d = centered @ eigenvectors[:, :2]
+                
+                # Compute 2D convex hull
+                hull_2d = ConvexHull(projected_2d)
+                hull_indices = hull_2d.vertices
+                
+                # Get 3D coordinates of hull vertices
+                hull_vertices_3d = combined_vertices[hull_indices]
+                
+                # Create merged surface
+                merged_id = f"MERGED_{'_'.join([mid.split('_')[-1][:8] for mid in merged_ids[:3]])}"
+                merged_surface = WallSurface(merged_id, hull_vertices_3d)
+                merged_surfaces.append(merged_surface)
+                
+                print(f"  Merged {len(group)} surfaces into {merged_id}")
+                
+            except Exception as e:
+                print(f"  Warning: Could not merge group of {len(group)} surfaces: {e}")
+                # Fall back to keeping original surfaces
+                for idx in group:
+                    merged_surfaces.append(wall_surfaces[idx])
+    
+    print(f"  Final count: {len(merged_surfaces)} ({len(wall_surfaces) - len(merged_surfaces)} surfaces merged)")
+    return merged_surfaces
 
 
 def load_las_pointcloud(las_file: str) -> o3d.geometry.PointCloud:
@@ -514,6 +724,12 @@ def main():
                        help='Visualize each alignment')
     parser.add_argument('--visualize_walls', action='store_true',
                        help='Only visualize wall surfaces and exit')
+    parser.add_argument('--merge_walls', action='store_true',
+                       help='Merge adjacent wall surfaces with similar normals before processing')
+    parser.add_argument('--normal_threshold', type=float, default=5.0,
+                       help='Normal angle threshold in degrees for merging (default: 5.0)')
+    parser.add_argument('--distance_threshold', type=float, default=2.0,
+                       help='Distance threshold in meters for adjacency detection (default: 2.0)')
     
     args = parser.parse_args()
     
@@ -535,6 +751,14 @@ def main():
     if not wall_surfaces:
         print("ERROR: No WallSurfaces found in GML file")
         return
+    
+    # Merge wall surfaces if requested
+    if args.merge_walls:
+        wall_surfaces = merge_wall_surfaces(
+            wall_surfaces, 
+            normal_angle_threshold=args.normal_threshold,
+            distance_threshold=args.distance_threshold
+        )
     
     # Visualize walls if requested
     if args.visualize_walls:

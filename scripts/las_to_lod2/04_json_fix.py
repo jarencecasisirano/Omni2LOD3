@@ -6,6 +6,7 @@ Fixes (report-driven):
 - 902 EMPTY_PRIMITIVE: removes geometry entries with empty boundaries
 - 102 CONSECUTIVE_POINTS_SAME: targeted cleanup only on val3dity-flagged faces
 - 204 NON_PLANAR_POLYGON_NORMALS_DEVIATION: targeted face projection to a fitted plane
+- 307 POLYGON_WRONG_ORIENTATION: targeted orientation flip on val3dity-flagged faces
 
 Behavior:
 - Default INPUT dir:  <project_root>/data/03_json_model
@@ -25,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.val3dity_102 import apply_102_fix_from_report
 from utils.val3dity_204 import apply_204_fix_from_report
+from utils.val3dity_307 import apply_307_fix_from_report
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -152,7 +154,7 @@ def _fix_cityobject_geometries(cityobj: dict):
     }
 
 
-def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, tol_override=None):
+def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, tol_override=None, target_code=None):
     with input_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -165,6 +167,15 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
     fix_902_enabled = 902 in codes
     fix_102_enabled = 102 in codes
     fix_204_enabled = 204 in codes
+    fix_307_enabled = 307 in codes
+
+    if target_code is not None:
+        fix_902_enabled = fix_902_enabled and target_code == 902
+        fix_102_enabled = fix_102_enabled and target_code == 102
+        fix_204_enabled = fix_204_enabled and target_code == 204
+        fix_307_enabled = fix_307_enabled and target_code == 307
+
+    selected_code = target_code if target_code is not None else None
 
     objects_modified = 0
     geometries_removed = 0
@@ -187,9 +198,18 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
         "targets_unresolved": 0,
         "objects_modified": 0,
         "faces_projected": 0,
+        "face_vertices_cloned": 0,
         "vertices_moved": 0,
         "max_displacement": 0.0,
         "faces_skipped_large_move": 0,
+    }
+    fix307_stats = {
+        "targets_total": 0,
+        "targets_resolved": 0,
+        "targets_missing": 0,
+        "targets_unresolved": 0,
+        "objects_modified": 0,
+        "faces_flipped": 0,
     }
 
     tol = tol_override if tol_override is not None else _report_snap_tol(report_json)
@@ -204,6 +224,8 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
         max_move_204 = 0.01
     if fix_204_enabled:
         fix204_stats = apply_204_fix_from_report(data, report_json, max_move=max_move_204)
+    if fix_307_enabled:
+        fix307_stats = apply_307_fix_from_report(data, report_json)
 
     for _, obj in city_objects.items():
         if not isinstance(obj, dict):
@@ -229,10 +251,13 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
         "fix_902_enabled": fix_902_enabled,
         "fix_102_enabled": fix_102_enabled,
         "fix_204_enabled": fix_204_enabled,
+        "fix_307_enabled": fix_307_enabled,
+        "selected_code": selected_code,
         "tol_used": tol,
         "max_move_204": max_move_204,
         "fix102": fix102_stats,
         "fix204": fix204_stats,
+        "fix307": fix307_stats,
     }
 
 
@@ -255,6 +280,7 @@ def choose_index(n: int, prompt: str):
 def _parse_cli_options(args):
     report_path = None
     tol_override = None
+    target_code = None
 
     i = 0
     while i < len(args):
@@ -273,9 +299,17 @@ def _parse_cli_options(args):
                 raise ValueError("--tol must be > 0")
             i += 2
             continue
+        if arg == "--target-code":
+            if i + 1 >= len(args):
+                raise ValueError("Missing value for --target-code")
+            target_code = int(args[i + 1])
+            if target_code not in (102, 204, 307, 902):
+                raise ValueError("--target-code must be one of: 102, 204, 307, 902")
+            i += 2
+            continue
         raise ValueError(f"Unknown argument: {arg}")
 
-    return report_path, tol_override
+    return report_path, tol_override, target_code
 
 
 def main():
@@ -284,7 +318,7 @@ def main():
         in_path = Path(sys.argv[1])
         out_path = Path(sys.argv[2])
         try:
-            report_override, tol_override = _parse_cli_options(sys.argv[3:])
+            report_override, tol_override, target_code = _parse_cli_options(sys.argv[3:])
         except Exception as e:
             print(f"[ERROR] {e}")
             print("Usage: python 04_json_fix.py <input_json> <output_json> [--report <report_json>] [--tol 0.001]")
@@ -310,7 +344,13 @@ def main():
             sys.exit(1)
 
         try:
-            stats = fix_cityjson_file(in_path, out_path, report_json=report_json, tol_override=tol_override)
+            stats = fix_cityjson_file(
+                in_path,
+                out_path,
+                report_json=report_json,
+                tol_override=tol_override,
+                target_code=target_code,
+            )
         except Exception as e:
             print(f"[ERROR] Fix failed: {e}")
             sys.exit(1)
@@ -318,9 +358,11 @@ def main():
         codes_txt = ", ".join(str(c) for c in sorted(codes)) if codes else "none"
         print("Done.")
         print(f"  val3dity codes found:      {codes_txt}")
+        print(f"  Selected code this pass:   {stats['selected_code']}")
         print(f"  Applied fix 902:           {'yes' if stats['fix_902_enabled'] else 'no'}")
         print(f"  Applied fix 102:           {'yes' if stats['fix_102_enabled'] else 'no'}")
         print(f"  Applied fix 204:           {'yes' if stats['fix_204_enabled'] else 'no'}")
+        print(f"  Applied fix 307:           {'yes' if stats['fix_307_enabled'] else 'no'}")
         print(f"  Snap tol used for 102:     {stats['tol_used']}")
         print(f"  Max move used for 204:     {stats['max_move_204']}")
         print(f"  Objects modified:         {stats['objects_modified']}")
@@ -334,9 +376,13 @@ def main():
         print(f"  204 targets resolved:      {stats['fix204']['targets_resolved']}/{stats['fix204']['targets_total']}")
         print(f"  204 targets unresolved:    {stats['fix204']['targets_unresolved']}")
         print(f"  204 faces projected:       {stats['fix204']['faces_projected']}")
+        print(f"  204 face vertices cloned:  {stats['fix204']['face_vertices_cloned']}")
         print(f"  204 vertices moved:        {stats['fix204']['vertices_moved']}")
         print(f"  204 max displacement:      {stats['fix204']['max_displacement']}")
         print(f"  204 faces skipped (move):  {stats['fix204']['faces_skipped_large_move']}")
+        print(f"  307 targets resolved:      {stats['fix307']['targets_resolved']}/{stats['fix307']['targets_total']}")
+        print(f"  307 targets unresolved:    {stats['fix307']['targets_unresolved']}")
+        print(f"  307 faces flipped:         {stats['fix307']['faces_flipped']}")
         print("=" * 70 + "\n")
         return
 
@@ -387,9 +433,14 @@ def main():
         "targets204_resolved": 0,
         "targets204_unresolved": 0,
         "faces204_projected": 0,
+        "face204_vertices_cloned": 0,
         "vertices204_moved": 0,
         "max204_displacement": 0.0,
         "faces204_skipped_large_move": 0,
+        "targets307_total": 0,
+        "targets307_resolved": 0,
+        "targets307_unresolved": 0,
+        "faces307_flipped": 0,
     }
 
     for p in targets:
@@ -426,10 +477,15 @@ def main():
         totals["targets204_resolved"] += stats["fix204"]["targets_resolved"]
         totals["targets204_unresolved"] += stats["fix204"]["targets_unresolved"]
         totals["faces204_projected"] += stats["fix204"]["faces_projected"]
+        totals["face204_vertices_cloned"] += stats["fix204"]["face_vertices_cloned"]
         totals["vertices204_moved"] += stats["fix204"]["vertices_moved"]
         totals["faces204_skipped_large_move"] += stats["fix204"]["faces_skipped_large_move"]
         if stats["fix204"]["max_displacement"] > totals["max204_displacement"]:
             totals["max204_displacement"] = stats["fix204"]["max_displacement"]
+        totals["targets307_total"] += stats["fix307"]["targets_total"]
+        totals["targets307_resolved"] += stats["fix307"]["targets_resolved"]
+        totals["targets307_unresolved"] += stats["fix307"]["targets_unresolved"]
+        totals["faces307_flipped"] += stats["fix307"]["faces_flipped"]
 
         print(f"  Saved to: {out_path}")
         print("  Summary:")
@@ -438,6 +494,7 @@ def main():
         print(f"     Applied fix 902:           {'yes' if stats['fix_902_enabled'] else 'no'}")
         print(f"     Applied fix 102:           {'yes' if stats['fix_102_enabled'] else 'no'}")
         print(f"     Applied fix 204:           {'yes' if stats['fix_204_enabled'] else 'no'}")
+        print(f"     Applied fix 307:           {'yes' if stats['fix_307_enabled'] else 'no'}")
         print(f"     Snap tol used for 102:     {stats['tol_used']}")
         print(f"     Max move used for 204:     {stats['max_move_204']}")
         print(f"     Objects modified:         {stats['objects_modified']}")
@@ -451,9 +508,13 @@ def main():
         print(f"     204 targets resolved:      {stats['fix204']['targets_resolved']}/{stats['fix204']['targets_total']}")
         print(f"     204 targets unresolved:    {stats['fix204']['targets_unresolved']}")
         print(f"     204 faces projected:       {stats['fix204']['faces_projected']}")
+        print(f"     204 face vertices cloned:  {stats['fix204']['face_vertices_cloned']}")
         print(f"     204 vertices moved:        {stats['fix204']['vertices_moved']}")
         print(f"     204 max displacement:      {stats['fix204']['max_displacement']}")
         print(f"     204 faces skipped (move):  {stats['fix204']['faces_skipped_large_move']}")
+        print(f"     307 targets resolved:      {stats['fix307']['targets_resolved']}/{stats['fix307']['targets_total']}")
+        print(f"     307 targets unresolved:    {stats['fix307']['targets_unresolved']}")
+        print(f"     307 faces flipped:         {stats['fix307']['faces_flipped']}")
 
     print("\n" + "=" * 70)
     print("PROCESSING SUMMARY")
@@ -470,9 +531,13 @@ def main():
     print(f"204 targets resolved:      {totals['targets204_resolved']}/{totals['targets204_total']}")
     print(f"204 targets unresolved:    {totals['targets204_unresolved']}")
     print(f"204 faces projected:       {totals['faces204_projected']}")
+    print(f"204 face vertices cloned:  {totals['face204_vertices_cloned']}")
     print(f"204 vertices moved:        {totals['vertices204_moved']}")
     print(f"204 max displacement:      {totals['max204_displacement']}")
     print(f"204 faces skipped (move):  {totals['faces204_skipped_large_move']}")
+    print(f"307 targets resolved:      {totals['targets307_resolved']}/{totals['targets307_total']}")
+    print(f"307 targets unresolved:    {totals['targets307_unresolved']}")
+    print(f"307 faces flipped:         {totals['faces307_flipped']}")
     print("=" * 70)
     print(f"Check: {output_dir}")
     print("Done.\n")

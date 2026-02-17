@@ -118,6 +118,36 @@ def _normalize_face_to_rings(face_node):
     return [r for r in face_node if isinstance(r, list)]
 
 
+def _clone_face_vertices_and_rewire(face_node, vertices):
+    """
+    Clone vertices referenced by this face and rewrite the face rings to use clones.
+    Returns (new_vidx_list, cloned_count, mapping_orig_to_clone).
+    """
+    rings = _normalize_face_to_rings(face_node)
+    if not rings:
+        return [], 0, {}
+
+    mapping = {}
+    cloned = 0
+    new_vidx = []
+
+    for ring in rings:
+        for i, vidx in enumerate(ring):
+            if not isinstance(vidx, int):
+                continue
+            if vidx < 0 or vidx >= len(vertices):
+                continue
+            if vidx not in mapping:
+                src = vertices[vidx]
+                vertices.append([float(src[0]), float(src[1]), float(src[2])])
+                mapping[vidx] = len(vertices) - 1
+                cloned += 1
+            ring[i] = mapping[vidx]
+            new_vidx.append(ring[i])
+
+    return new_vidx, cloned, mapping
+
+
 def _iter_204_targets(report_json):
     features = report_json.get("features", [])
     for feature in features:
@@ -189,6 +219,7 @@ def apply_204_fix_from_report(cityjson_data: dict, report_json: dict, max_move: 
         "targets_unresolved": 0,
         "objects_modified": 0,
         "faces_projected": 0,
+        "face_vertices_cloned": 0,
         "vertices_moved": 0,
         "max_displacement": 0.0,
         "faces_skipped_large_move": 0,
@@ -265,9 +296,16 @@ def apply_204_fix_from_report(cityjson_data: dict, report_json: dict, max_move: 
             stats["targets_unresolved"] += 1
             continue
 
+        # Safe to apply: clone face-local vertices and rewire this face only.
+        _, cloned_count, mapping = _clone_face_vertices_and_rewire(face_node, vertices)
+        stats["face_vertices_cloned"] += cloned_count
+
         moved_here = 0
-        for vidx, (p_proj, ad) in projected.items():
-            _set_world_xyz(vertices, vidx, p_proj, transform)
+        for orig_vidx, (p_proj, ad) in projected.items():
+            clone_vidx = mapping.get(orig_vidx)
+            if clone_vidx is None:
+                continue
+            _set_world_xyz(vertices, clone_vidx, p_proj, transform)
             if ad > 0.0:
                 moved_here += 1
             if ad > stats["max_displacement"]:

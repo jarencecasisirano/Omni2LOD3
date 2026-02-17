@@ -31,8 +31,6 @@ def main():
     footprint_shp = sys.argv[2]
     las_output = sys.argv[3]
 
-    os.makedirs(os.path.dirname(las_output) or ".", exist_ok=True)
-
     print("\n" + "=" * 70)
     print("POINT CLOUD RECLASSIFICATION BY FOOTPRINT")
     print("=" * 70)
@@ -103,10 +101,19 @@ def main():
         if (poly_idx + 1) % 5 == 0:
             print(f"   Processed footprint {poly_idx + 1}/{len(footprints)}")
 
+    inside_total = int(inside_any.sum())
+    if inside_total == 0:
+        print("\n" + "-" * 60)
+        print("[INFO] No points detected inside footprint. Stopping process.")
+        print("[INFO] No output LAS written.")
+        print("-" * 60)
+        print("=" * 70)
+        sys.exit(0)
+
+    os.makedirs(os.path.dirname(las_output) or ".", exist_ok=True)
     las.classification = cls
     las.write(las_output)
 
-    inside_total = int(inside_any.sum())
     print("\n" + "-" * 60)
     print(f"Points inside footprint(s):      {inside_total:,}")
     print(f"Points forced to class 6:        {forced_count:,}")

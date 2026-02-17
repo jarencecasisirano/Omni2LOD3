@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.io_helpers import choose_index, list_json_files
 from utils.val3dity_102 import apply_102_fix_from_report
+from utils.val3dity_104 import apply_104_fix_from_report
 from utils.val3dity_204 import apply_204_fix_from_report
 from utils.val3dity_307 import apply_307_fix_from_report
 from utils.val3dity_report import extract_error_codes, load_report_error_codes, load_report_json
@@ -134,12 +135,14 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
     codes = extract_error_codes(report_json)
     fix_902_enabled = 902 in codes
     fix_102_enabled = 102 in codes
+    fix_104_enabled = 104 in codes
     fix_204_enabled = 204 in codes
     fix_307_enabled = 307 in codes
 
     if target_code is not None:
         fix_902_enabled = fix_902_enabled and target_code == 902
         fix_102_enabled = fix_102_enabled and target_code == 102
+        fix_104_enabled = fix_104_enabled and target_code == 104
         fix_204_enabled = fix_204_enabled and target_code == 204
         fix_307_enabled = fix_307_enabled and target_code == 307
 
@@ -158,6 +161,14 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
         "new_vertices_added": 0,
         "rings_dropped": 0,
         "faces_dropped": 0,
+    }
+    fix104_stats = {
+        "targets_total": 0,
+        "targets_resolved": 0,
+        "targets_missing": 0,
+        "targets_unresolved": 0,
+        "objects_modified": 0,
+        "rings_untangled": 0,
     }
     fix204_stats = {
         "targets_total": 0,
@@ -186,6 +197,8 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
 
     if fix_102_enabled:
         fix102_stats = apply_102_fix_from_report(data, report_json, tol=tol)
+    if fix_104_enabled:
+        fix104_stats = apply_104_fix_from_report(data, report_json, tol=tol)
 
     max_move_204 = _report_planarity_d2p_tol(report_json)
     if max_move_204 is None:
@@ -218,12 +231,14 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
         "geometries_removed": geometries_removed,
         "fix_902_enabled": fix_902_enabled,
         "fix_102_enabled": fix_102_enabled,
+        "fix_104_enabled": fix_104_enabled,
         "fix_204_enabled": fix_204_enabled,
         "fix_307_enabled": fix_307_enabled,
         "selected_code": selected_code,
         "tol_used": tol,
         "max_move_204": max_move_204,
         "fix102": fix102_stats,
+        "fix104": fix104_stats,
         "fix204": fix204_stats,
         "fix307": fix307_stats,
     }
@@ -253,8 +268,8 @@ def _parse_cli_options(args):
             if i + 1 >= len(args):
                 raise ValueError("Missing value for --target-code")
             target_code = int(args[i + 1])
-            if target_code not in (102, 204, 307, 902):
-                raise ValueError("--target-code must be one of: 102, 204, 307, 902")
+            if target_code not in (102, 104, 204, 307, 902):
+                raise ValueError("--target-code must be one of: 102, 104, 204, 307, 902")
             i += 2
             continue
         raise ValueError(f"Unknown argument: {arg}")
@@ -303,6 +318,8 @@ def main():
             applied.append("902")
         if stats["fix_102_enabled"]:
             applied.append("102")
+        if stats["fix_104_enabled"]:
+            applied.append("104")
         if stats["fix_204_enabled"]:
             applied.append("204")
         if stats["fix_307_enabled"]:
@@ -424,6 +441,7 @@ def main():
         print(f"     val3dity codes found:      {codes_txt}")
         print(f"     Applied fix 902:           {'yes' if stats['fix_902_enabled'] else 'no'}")
         print(f"     Applied fix 102:           {'yes' if stats['fix_102_enabled'] else 'no'}")
+        print(f"     Applied fix 104:           {'yes' if stats['fix_104_enabled'] else 'no'}")
         print(f"     Applied fix 204:           {'yes' if stats['fix_204_enabled'] else 'no'}")
         print(f"     Applied fix 307:           {'yes' if stats['fix_307_enabled'] else 'no'}")
         print(f"     Snap tol used for 102:     {stats['tol_used']}")

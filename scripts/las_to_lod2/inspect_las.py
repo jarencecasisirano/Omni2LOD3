@@ -130,7 +130,7 @@ def inspect_las(las_path):
 
     # Save TXT report
     base = os.path.splitext(os.path.basename(las_path))[0]
-    out_txt = os.path.join(OUT_INFO, f"{base}_inspect.txt")
+    out_txt = os.path.join(OUT_INFO, f"{base}_info.txt")
 
     with open(out_txt, "w", encoding="utf-8") as f:
         for line in report_lines:

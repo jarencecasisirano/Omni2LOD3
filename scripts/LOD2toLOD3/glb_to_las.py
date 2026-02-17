@@ -179,34 +179,83 @@ def process_file(file_path, output_dir, n_samples=1000000):
 def main():
     parser = argparse.ArgumentParser(description="Convert GLB files to LAS point clouds.")
     parser.add_argument("--file", type=str, help="Specific GLB file to process (filename only)")
-    parser.add_argument("--input_dir", type=str, default="data/glb_file", help="Input directory containing GLB files")
-    parser.add_argument("--output_dir", type=str, default="outputs/02_pointclouds", help="Output directory for LAS files")
+    parser.add_argument("--input_dir", type=str, default="outputs/02_glb_file", help="Input directory containing GLB files")
+    parser.add_argument("--output_dir", type=str, default="outputs/03_pointclouds", help="Output directory for LAS files")
     parser.add_argument("--samples", type=int, default=1000000, help="Number of points to sample per file")
     
     args = parser.parse_args()
     
-    # Ensure output directory exists
-    os.makedirs(args.output_dir, exist_ok=True)
-    
     files_to_process = []
     
     if args.file:
+        # If a specific file is requested, look for it recursively if not found directly
         file_path = os.path.join(args.input_dir, args.file)
-        if not os.path.exists(file_path):
-            print(f"Error: File {args.file} not found in {args.input_dir}")
-            return
-        files_to_process.append(file_path)
+        if os.path.exists(file_path):
+             files_to_process.append(file_path)
+        else:
+            # Try to find it recursively
+            found_files = glob.glob(os.path.join(args.input_dir, "**", args.file), recursive=True)
+            if found_files:
+                files_to_process.extend(found_files)
+            else:
+                print(f"Error: File {args.file} not found in {args.input_dir}")
+                return
     else:
-        files_to_process = glob.glob(os.path.join(args.input_dir, "*.glb"))
-    
+        # Interactive selection
+        if not os.path.exists(args.input_dir):
+             print(f"Error: Input directory {args.input_dir} does not exist.")
+             return
+
+        # Get subdirectories
+        subdirs = [d for d in os.listdir(args.input_dir) if os.path.isdir(os.path.join(args.input_dir, d))]
+        subdirs.sort()
+        
+        print(f"\nFound {len(subdirs)} subdirectories in {args.input_dir}:")
+        print("0: [PROCESS ALL FILES RECURSIVELY]")
+        print("1: [ROOT ONLY] (Files in top-level directory)")
+        for i, subdir in enumerate(subdirs):
+            print(f"{i+2}: {subdir}")
+            
+        try:
+            selection = input("\nSelect directory to process (enter number): ")
+            selection = int(selection)
+        except ValueError:
+            print("Invalid selection. Exiting.")
+            return
+
+        if selection == 0:
+            print("Processing ALL files recursively...")
+            files_to_process = glob.glob(os.path.join(args.input_dir, "**", "*.glb"), recursive=True)
+        elif selection == 1:
+            print("Processing ROOT files only...")
+            files_to_process = glob.glob(os.path.join(args.input_dir, "*.glb"))
+        elif selection >= 2 and selection < len(subdirs) + 2:
+            target_subdir = subdirs[selection - 2]
+            print(f"Processing directory: {target_subdir}")
+            # Process files in that subdirectory (and its subdirectories if any)
+            target_path = os.path.join(args.input_dir, target_subdir)
+            files_to_process = glob.glob(os.path.join(target_path, "**", "*.glb"), recursive=True)
+        else:
+            print("Invalid selection number. Exiting.")
+            return
+
     if not files_to_process:
-        print(f"No .glb files found in {args.input_dir}")
+        print(f"No .glb files found to process.")
         return
 
     print(f"Found {len(files_to_process)} files to process.")
     
+    # Process files
     for file_path in tqdm(files_to_process):
-        process_file(file_path, args.output_dir, args.samples)
+        # Determine relative path to maintain structure in output
+        rel_path = os.path.relpath(os.path.dirname(file_path), args.input_dir)
+        if rel_path == ".":
+            current_output_dir = args.output_dir
+        else:
+            current_output_dir = os.path.join(args.output_dir, rel_path)
+            
+        os.makedirs(current_output_dir, exist_ok=True)
+        process_file(file_path, current_output_dir, args.samples)
 
 if __name__ == "__main__":
     main()

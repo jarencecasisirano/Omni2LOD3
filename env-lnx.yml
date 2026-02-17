@@ -19,6 +19,9 @@ dependencies:
   - shapely
   - tqdm
   - pip
+  - pytorch::pytorch=2.2.2  # Required for Open3D-ML
+  - pytorch::torchvision
+  - pytorch::pytorch-cuda=12.1  # CUDA support for PyTorch
   - pip:
       - alphashape
       - trimesh
@@ -30,3 +33,7 @@ dependencies:
       - plotly
       - ipywidgets
       - dash
+      - tensorboard  # Required for Open3D-ML training/visualization
+      - cloth-simulation-filter  # CSF for ground removal
+      # Note: Open3D-ML is installed from source at /home/demi/Omni2LOD3/Open3D-ML
+      # To install: cd Open3D-ML && pip install -e .

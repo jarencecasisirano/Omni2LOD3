@@ -15,6 +15,13 @@ dependencies:
   - shapely  # Used in segment_planes for geometry operations
   - matplotlib  # Used in classify_points, segment_planes for plotting
   - scipy  # Used in classify_points for cKDTree
+  - pytorch::pytorch=2.2.2  # Required for Open3D-ML
+  - pytorch::torchvision
+  - pytorch::pytorch-cuda=12.1  # CUDA support for PyTorch (use cpuonly if no GPU)
   - pip:
-      # No additional pip packages needed beyond conda ones for these scripts
+      - tensorboard  # Required for Open3D-ML training/visualization
+      - cloth-simulation-filter  # CSF for ground removal
+      # Note: Open3D-ML should be installed from source
+      # Clone: git clone https://github.com/isl-org/Open3D-ML.git
+      # Install: cd Open3D-ML && pip install -e .
 prefix: C:\miniconda3\envs\las-env

@@ -762,11 +762,14 @@ def main():
     
     # Visualize walls if requested
     if args.visualize_walls:
-        print("\nPreparing wall surface visualization with index markers...")
+        print("\nPreparing wall surface visualization with color-coded index markers...")
         geometries = []
         
         # Create a color map for better distinction
         import colorsys
+        
+        # Store colors for legend
+        color_map = []
         
         for i, wall in enumerate(wall_surfaces):
             # Create wall point cloud
@@ -778,23 +781,49 @@ def main():
             pcd.paint_uniform_color(rgb)
             geometries.append(pcd)
             
-            # Add a sphere marker at the center with index number
+            # Store color for legend
+            color_map.append((i, rgb, wall))
+            
+            # Add a sphere marker at the center
             center = wall.get_center()
             marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.5)
             marker.translate(center)
             marker.paint_uniform_color([1, 0, 0])  # Red markers
             geometries.append(marker)
-            
-            # Print legend
-            if i % 10 == 0 or i < 20:  # Print first 20 and every 10th
-                print(f"  [{i}] {wall.id[:30]}... - Center: ({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f})")
         
-        print(f"\nDisplaying {len(wall_surfaces)} wall surfaces with RED sphere markers at centers")
-        print("Each wall has a unique color. Sphere markers show wall centers.")
-        print("Refer to the printed list or terminal output to match index numbers to wall IDs.")
+        # Print color legend with ANSI colors
+        print(f"\n{'='*80}")
+        print(f"WALL SURFACE COLOR LEGEND")
+        print(f"{'='*80}")
+        print(f"Total surfaces: {len(wall_surfaces)}\n")
+        print(f"Each wall surface has a unique color. Match the colors below to the 3D view:")
+        print(f"{'='*80}\n")
+        
+        # Print color legend with actual colors (using ANSI escape codes)
+        for idx, rgb, wall in color_map:
+            # Convert RGB (0-1) to RGB (0-255) for ANSI
+            r, g, b = int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
+            
+            # ANSI escape code for 24-bit true color
+            color_block = f"\033[48;2;{r};{g};{b}m   \033[0m"
+            
+            center = wall.get_center()
+            # Print with color block
+            print(f"  {color_block} [{idx:3d}] {wall.id[:45]:<45} @ ({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f})")
+        
+        print(f"\n{'='*80}")
+        print(f"VISUALIZATION GUIDE:")
+        print(f"{'='*80}")
+        print(f"🔴 RED SPHERES = Wall surface centers")
+        print(f"🌈 COLORED SURFACES = Each wall (match colors to legend above)")
+        print(f"\nHow to identify walls:")
+        print(f"  1. Look at the color legend above")
+        print(f"  2. Find the matching colored surface in the 3D viewer")
+        print(f"  3. The red sphere marks its center position")
+        print(f"{'='*80}\n")
         
         o3d.visualization.draw_geometries(geometries, 
-                                         window_name=f"GML WallSurfaces ({len(wall_surfaces)} walls with index markers)",
+                                         window_name=f"GML WallSurfaces ({len(wall_surfaces)} walls)",
                                          width=1280, height=720)
         return
     

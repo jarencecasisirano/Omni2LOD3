@@ -24,9 +24,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.io_helpers import choose_index, list_json_files
 from utils.val3dity_102 import apply_102_fix_from_report
 from utils.val3dity_204 import apply_204_fix_from_report
 from utils.val3dity_307 import apply_307_fix_from_report
+from utils.val3dity_report import extract_error_codes, load_report_error_codes, load_report_json
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -54,39 +56,6 @@ def _is_effectively_empty(node) -> bool:
             return True
         return all(_is_effectively_empty(child) for child in node)
     return False
-
-
-def _extract_error_codes_from_node(node, out_codes: set):
-    if isinstance(node, dict):
-        for k, v in node.items():
-            kl = str(k).lower()
-            if "error" in kl or "code" in kl:
-                if isinstance(v, int):
-                    out_codes.add(v)
-                elif isinstance(v, str) and v.strip().isdigit():
-                    out_codes.add(int(v.strip()))
-            _extract_error_codes_from_node(v, out_codes)
-        return
-
-    if isinstance(node, list):
-        for item in node:
-            _extract_error_codes_from_node(item, out_codes)
-
-
-def _load_report_error_codes(report_json_path: Path):
-    data = _load_report_json(report_json_path)
-    codes = set()
-    _extract_error_codes_from_node(data, codes)
-    return codes
-
-
-def _load_report_json(report_json_path: Path):
-    if not report_json_path.exists():
-        raise FileNotFoundError(f"val3dity report not found: {report_json_path}")
-    try:
-        return json.loads(report_json_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ValueError(f"Could not parse val3dity report JSON: {e}") from e
 
 
 def _report_snap_tol(report_json: dict):
@@ -162,8 +131,7 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
     if not isinstance(city_objects, dict):
         raise ValueError("Invalid CityJSON: CityObjects is not a dict")
 
-    codes = set()
-    _extract_error_codes_from_node(report_json, codes)
+    codes = extract_error_codes(report_json)
     fix_902_enabled = 902 in codes
     fix_102_enabled = 102 in codes
     fix_204_enabled = 204 in codes
@@ -259,24 +227,6 @@ def fix_cityjson_file(input_path: Path, output_path: Path, report_json: dict, to
         "fix204": fix204_stats,
         "fix307": fix307_stats,
     }
-
-
-def list_json_files(folder: Path):
-    if not folder.exists():
-        return []
-    return sorted(folder.glob("*.json"))
-
-
-def choose_index(n: int, prompt: str):
-    choice = input(prompt).strip()
-    if not choice.isdigit():
-        return None
-    idx = int(choice)
-    if idx < 0 or idx > n:
-        return None
-    return idx
-
-
 def _parse_cli_options(args):
     report_path = None
     tol_override = None
@@ -325,20 +275,13 @@ def main():
             sys.exit(1)
         report_path = report_override if report_override else _default_report_path_for_input(in_path)
 
-        print("\n" + "=" * 70)
-        print("LOD2 CityJSON Geometry Fixer (CLI MODE)")
-        print("=" * 70)
-        print(f"Input:  {in_path}")
-        print(f"Output: {out_path}")
-        print(f"Report: {report_path}")
-
         if not in_path.exists():
             print(f"[ERROR] Input file not found: {in_path}")
             sys.exit(1)
 
         try:
-            report_json = _load_report_json(report_path)
-            codes = _load_report_error_codes(report_path)
+            report_json = load_report_json(report_path)
+            codes = load_report_error_codes(report_path)
         except Exception as e:
             print(f"[ERROR] Could not load val3dity report: {e}")
             sys.exit(1)
@@ -355,35 +298,18 @@ def main():
             print(f"[ERROR] Fix failed: {e}")
             sys.exit(1)
 
-        codes_txt = ", ".join(str(c) for c in sorted(codes)) if codes else "none"
-        print("Done.")
-        print(f"  val3dity codes found:      {codes_txt}")
-        print(f"  Selected code this pass:   {stats['selected_code']}")
-        print(f"  Applied fix 902:           {'yes' if stats['fix_902_enabled'] else 'no'}")
-        print(f"  Applied fix 102:           {'yes' if stats['fix_102_enabled'] else 'no'}")
-        print(f"  Applied fix 204:           {'yes' if stats['fix_204_enabled'] else 'no'}")
-        print(f"  Applied fix 307:           {'yes' if stats['fix_307_enabled'] else 'no'}")
-        print(f"  Snap tol used for 102:     {stats['tol_used']}")
-        print(f"  Max move used for 204:     {stats['max_move_204']}")
-        print(f"  Objects modified:         {stats['objects_modified']}")
-        print(f"  Empty geometries removed: {stats['geometries_removed']}")
-        print(f"  102 targets resolved:      {stats['fix102']['targets_resolved']}/{stats['fix102']['targets_total']}")
-        print(f"  102 targets unresolved:    {stats['fix102']['targets_unresolved']}")
-        print(f"  102 consecutive removed:   {stats['fix102']['consecutive_removed']}")
-        print(f"  102 rings nudged:          {stats['fix102']['rings_nudged']}")
-        print(f"  102 new vertices added:    {stats['fix102']['new_vertices_added']}")
-        print(f"  102 faces dropped:         {stats['fix102']['faces_dropped']} (expected 0)")
-        print(f"  204 targets resolved:      {stats['fix204']['targets_resolved']}/{stats['fix204']['targets_total']}")
-        print(f"  204 targets unresolved:    {stats['fix204']['targets_unresolved']}")
-        print(f"  204 faces projected:       {stats['fix204']['faces_projected']}")
-        print(f"  204 face vertices cloned:  {stats['fix204']['face_vertices_cloned']}")
-        print(f"  204 vertices moved:        {stats['fix204']['vertices_moved']}")
-        print(f"  204 max displacement:      {stats['fix204']['max_displacement']}")
-        print(f"  204 faces skipped (move):  {stats['fix204']['faces_skipped_large_move']}")
-        print(f"  307 targets resolved:      {stats['fix307']['targets_resolved']}/{stats['fix307']['targets_total']}")
-        print(f"  307 targets unresolved:    {stats['fix307']['targets_unresolved']}")
-        print(f"  307 faces flipped:         {stats['fix307']['faces_flipped']}")
-        print("=" * 70 + "\n")
+        applied = []
+        if stats["fix_902_enabled"]:
+            applied.append("902")
+        if stats["fix_102_enabled"]:
+            applied.append("102")
+        if stats["fix_204_enabled"]:
+            applied.append("204")
+        if stats["fix_307_enabled"]:
+            applied.append("307")
+        applied_text = ", ".join(applied) if applied else "none"
+        print(f"Output: {out_path}")
+        print(f"Applied fix: {applied_text}")
         return
 
     # Interactive mode
@@ -397,7 +323,7 @@ def main():
     print(f"Output directory: {output_dir}")
     print(f"Report directory: {DEFAULT_REPORT_DIR}")
 
-    files = list_json_files(input_dir)
+    files = [Path(p) for p in list_json_files(input_dir)]
     if not files:
         print(f"[ERROR] No JSON files found in: {input_dir}")
         sys.exit(1)
@@ -409,7 +335,12 @@ def main():
     print(f"  [{len(files)}] Process ALL files")
     print("  [99] Exit\n")
 
-    idx = choose_index(len(files), f"Select file to fix [0-{len(files)}] (or 99): ")
+    idx = choose_index(
+        len(files),
+        f"Select file to fix [0-{len(files)}] (or 99): ",
+        max_index=len(files),
+        allowed_values={99},
+    )
     if idx is None:
         print("[ERROR] Invalid selection.")
         sys.exit(1)
@@ -452,8 +383,8 @@ def main():
         print(f"  Using report: {report_path.name}")
 
         try:
-            report_json = _load_report_json(report_path)
-            codes = _load_report_error_codes(report_path)
+            report_json = load_report_json(report_path)
+            codes = load_report_error_codes(report_path)
         except Exception as e:
             print(f"[ERROR] Missing/invalid report for {p.name}: {e}")
             continue
@@ -499,20 +430,29 @@ def main():
         print(f"     Max move used for 204:     {stats['max_move_204']}")
         print(f"     Objects modified:         {stats['objects_modified']}")
         print(f"     Empty geometries removed: {stats['geometries_removed']}")
-        print(f"     102 targets resolved:      {stats['fix102']['targets_resolved']}/{stats['fix102']['targets_total']}")
+        print(
+            f"     102 targets resolved:      "
+            f"{stats['fix102']['targets_resolved']}/{stats['fix102']['targets_total']}"
+        )
         print(f"     102 targets unresolved:    {stats['fix102']['targets_unresolved']}")
         print(f"     102 consecutive removed:   {stats['fix102']['consecutive_removed']}")
         print(f"     102 rings nudged:          {stats['fix102']['rings_nudged']}")
         print(f"     102 new vertices added:    {stats['fix102']['new_vertices_added']}")
         print(f"     102 faces dropped:         {stats['fix102']['faces_dropped']} (expected 0)")
-        print(f"     204 targets resolved:      {stats['fix204']['targets_resolved']}/{stats['fix204']['targets_total']}")
+        print(
+            f"     204 targets resolved:      "
+            f"{stats['fix204']['targets_resolved']}/{stats['fix204']['targets_total']}"
+        )
         print(f"     204 targets unresolved:    {stats['fix204']['targets_unresolved']}")
         print(f"     204 faces projected:       {stats['fix204']['faces_projected']}")
         print(f"     204 face vertices cloned:  {stats['fix204']['face_vertices_cloned']}")
         print(f"     204 vertices moved:        {stats['fix204']['vertices_moved']}")
         print(f"     204 max displacement:      {stats['fix204']['max_displacement']}")
         print(f"     204 faces skipped (move):  {stats['fix204']['faces_skipped_large_move']}")
-        print(f"     307 targets resolved:      {stats['fix307']['targets_resolved']}/{stats['fix307']['targets_total']}")
+        print(
+            f"     307 targets resolved:      "
+            f"{stats['fix307']['targets_resolved']}/{stats['fix307']['targets_total']}"
+        )
         print(f"     307 targets unresolved:    {stats['fix307']['targets_unresolved']}")
         print(f"     307 faces flipped:         {stats['fix307']['faces_flipped']}")
 

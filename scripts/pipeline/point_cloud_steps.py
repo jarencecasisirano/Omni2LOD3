@@ -9,39 +9,30 @@ from utils.paths import (
     DATA_PC_DIR,
     OUT_DOWNSAMPLED,
     OUT_RECLASSIFIED,
+    PROJECT_ROOT,
     SCRIPT_ASSIGN,
     SCRIPT_DOWN,
 )
 
 # ======================= POINT CLOUD PROCESSING =========================
-
-
 def pick_visualize_las():
     print("\nSelect folder:")
-    print("  [1] data")
-    print("  [2] outputs")
-    choice = input("Enter number: ").strip()
+    print("\t[0] Raw Data")
+    print("\t[1] Downsampled")
+    print("\t[2] Reclassified")
+    choice = input("Enter choice: ").strip()
+
+    if choice == "0":
+        files = list_las_files(DATA_PC_DIR)
+        return choose_file(files, "Select LAS file in data/01_point_cloud:", indent_choices=True)
 
     if choice == "1":
-        files = list_las_files(DATA_PC_DIR)
-        return choose_file(files, "Select LAS file in data/01_point_cloud:")
+        files = list_las_files(OUT_DOWNSAMPLED)
+        return choose_file(files, "Select LAS file in 01_downsampled:", indent_choices=True)
 
     if choice == "2":
-        print("\nSelect outputs subfolder:")
-        print("[0] Downsampled")
-        print("[1] Reclassified")
-        sub = input("Enter index: ").strip()
-
-        if sub == "0":
-            folder = OUT_DOWNSAMPLED
-        elif sub == "1":
-            folder = OUT_RECLASSIFIED
-        else:
-            print("[ERROR] Invalid selection.")
-            return None
-
-        files = list_las_files(folder)
-        return choose_file(files, f"Select LAS file in {os.path.basename(folder)}:")
+        files = list_las_files(OUT_RECLASSIFIED)
+        return choose_file(files, "Select LAS file in 02_reclassified:", indent_choices=True)
 
     print("[ERROR] Invalid selection.")
     return None
@@ -49,7 +40,7 @@ def pick_visualize_las():
 
 def step_downsample():
     files = list_las_files(DATA_PC_DIR)
-    input_las = choose_file(files, "Select raw point cloud to downsample:")
+    input_las = choose_file(files, "Select raw point cloud to downsample:", indent_choices=True)
     if not input_las:
         return None
 
@@ -64,7 +55,7 @@ def step_downsample():
     voxel_str = str(voxel_float).replace(".", "")
     output_las = os.path.join(OUT_DOWNSAMPLED, f"{base}_{voxel_str}_downsampled.las")
 
-    print("\n=== Running voxel downsampling ===")
+    print("\n=== RUNNING VOXEL DOWNSAMPLING ===")
     print(f"Input:  {input_las}")
     print(f"Output: {output_las}")
 
@@ -87,7 +78,7 @@ def step_assign_building_class(input_las=None):
     base = strip_suffix(base, ["_downsampled"])
     output_las = os.path.join(OUT_RECLASSIFIED, f"{base}_reclassified.las")
 
-    print("\n=== Running building class reassignment by footprint ===")
+    print("\n=== RUNNING POINT CLASS RECLASSIFICATION ===")
     print(f"Input:  {input_las}")
     print(f"Output: {output_las}")
 
@@ -105,12 +96,12 @@ def step_assign_building_class(input_las=None):
         print(f"[ERROR] Reclassified LAS was not created: {output_las}")
         return None
 
-    print("\n======================================================================")
+    print("\n=== RECLASSIFICATION COMPLETE ===")
     print("Point cloud is now ready for CityForge processing.")
-    print("Next:")
-    print(f"  1) Run CityForge using: {output_las}")
-    print(f"  2) Save/export the resulting CityJSON into: {DATA_JSON_DIR}")
-    print("  3) Then run menu option [3] (Validate + fix if invalid), then [4] (Convert to CityGML 2.0)")
-    print("======================================================================\n")
+    output_las_rel = os.path.relpath(output_las, PROJECT_ROOT)
+    print(f"\t[1] Run CityForge using: {output_las_rel}")
+    print(f"\t[2] Save/export the resulting CityJSON into: {DATA_JSON_DIR}")
+    print("\t[3] Run menu option [3]")
+    print()
 
     return output_las

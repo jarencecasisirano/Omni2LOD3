@@ -1,14 +1,4 @@
 # 02_reclassify.py
-"""
-Reclassify point cloud by footprint.
-
-Behavior:
-- Reads full LAS (typically downsampled output)
-- Finds points covered by the given footprint polygon(s)
-- Forces those points to LAS class 6 (Building)
-- Keeps all points (inside + outside footprint) in the output
-"""
-
 import os
 import sys
 import numpy as np
@@ -17,9 +7,7 @@ import laspy
 from shapely.geometry import Point
 from shapely.prepared import prep
 
-
 BUILDING_CLASS = 6
-
 
 def main():
     if len(sys.argv) < 4:
@@ -30,13 +18,6 @@ def main():
     las_input = sys.argv[1]
     footprint_shp = sys.argv[2]
     las_output = sys.argv[3]
-
-    print("\n" + "=" * 70)
-    print("POINT CLOUD RECLASSIFICATION BY FOOTPRINT")
-    print("=" * 70)
-    print(f"Input LAS: {las_input}")
-    print(f"Footprint: {footprint_shp}")
-    print(f"Output:    {las_output}")
 
     las = laspy.read(las_input)
     X = np.asarray(las.x)
@@ -54,7 +35,7 @@ def main():
 
     las_crs = las.header.parse_crs()
     if las_crs is not None and gdf.crs is not None and gdf.crs != las_crs:
-        print("-> Reprojecting footprint to LAS CRS...")
+        print("\t-> Reprojecting footprint to LAS CRS...")
         gdf = gdf.to_crs(las_crs)
 
     footprints = [geom.buffer(0) for geom in gdf.geometry.values if geom is not None and not geom.is_empty]
@@ -66,9 +47,9 @@ def main():
     forced_count = 0
     inside_any = np.zeros(n_total, dtype=bool)
 
-    print(f"-> Total points: {n_total:,}")
-    print(f"-> Footprints:   {len(footprints)}")
-    print("-> Reclassifying points inside footprint(s)...")
+    print(f"\t-> Total points: {n_total:,}")
+    print(f"\t-> Footprints:   {len(footprints)}")
+    print("\t-> Reclassifying points inside footprint(s)...")
 
     for poly_idx, poly in enumerate(footprints):
         prep_poly = prep(poly)
@@ -99,29 +80,21 @@ def main():
             forced_count += len(not_building)
 
         if (poly_idx + 1) % 5 == 0:
-            print(f"   Processed footprint {poly_idx + 1}/{len(footprints)}")
+            print(f"\t-> Processed footprint {poly_idx + 1}/{len(footprints)}")
 
     inside_total = int(inside_any.sum())
     if inside_total == 0:
-        print("\n" + "-" * 60)
-        print("[INFO] No points detected inside footprint. Stopping process.")
+        print("\n[INFO] No points detected inside footprint. Stopping process.")
         print("[INFO] No output LAS written.")
-        print("-" * 60)
-        print("=" * 70)
         sys.exit(0)
 
     os.makedirs(os.path.dirname(las_output) or ".", exist_ok=True)
     las.classification = cls
     las.write(las_output)
 
-    print("\n" + "-" * 60)
-    print(f"Points inside footprint(s):      {inside_total:,}")
-    print(f"Points forced to class 6:        {forced_count:,}")
-    print(f"Points outside footprint(s):     {n_total - inside_total:,}")
-    print("-" * 60)
-    print(f"-> Saved: {las_output}")
-    print("=" * 70)
-
+    print(f"\t\tPoints inside footprint(s):      {inside_total:,}")
+    print(f"\t\tPoints forced to class 6:        {forced_count:,}")
+    print(f"\t-> Reclassified LAS saved in folder: {os.path.dirname(las_output)}")
 
 if __name__ == "__main__":
     main()

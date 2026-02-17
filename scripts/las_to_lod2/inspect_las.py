@@ -1,153 +1,116 @@
 # inspect_las.py
 import os
+import subprocess
 import sys
-import glob
+from datetime import datetime
+from pathlib import Path
+
 import laspy
 import numpy as np
-import subprocess
-from datetime import datetime
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.io_helpers import choose_file, list_las_files
+from utils.paths import (
+    DATA_PC_DIR,
+    OUT_DOWNSAMPLED,
+    OUT_INFO,
+    OUT_RECLASSIFIED,
+    SCRIPT_VISUALIZE,
+)
 
-SCRIPT_VISUALIZE = os.path.join(PROJECT_ROOT, "scripts", "las_to_lod2", "visualize.py")
-DATA_PC_DIR   = os.path.join(PROJECT_ROOT, "data", "01_point_cloud")
-
-OUT_INFO = os.path.join(PROJECT_ROOT, "outputs", "00_las_info")
-os.makedirs(OUT_INFO, exist_ok=True)
-
-# Output folders
-OUT_DOWNSAMPLED = os.path.join(PROJECT_ROOT, "outputs", "01_downsampled")
-OUT_RECLASSIFIED = os.path.join(PROJECT_ROOT, "outputs", "02_reclassified")
-
-def list_las_files(folder):
-    files = sorted(glob.glob(os.path.join(folder, "*.las")))
-    return [f for f in files if not f.lower().endswith(".copc.las")]
-
-def choose_file(files, prompt):
-    if not files:
-        print("[ERROR] No LAS files found.")
-        return None
-    print(f"\n{prompt}")
-    for i, f in enumerate(files):
-        print(f"[{i}] {os.path.basename(f)}")
-    choice = input("Enter index: ").strip()
-    if not choice.isdigit():
-        print("[ERROR] Invalid selection.")
-        return None
-    idx = int(choice)
-    if idx < 0 or idx >= len(files):
-        print("[ERROR] Invalid selection.")
-        return None
-    return files[idx]
 
 def choose_folder():
-    """Let user select which folder category to inspect"""
-    print("\n=== Select Folder Type ===")
-    print("[0] Raw data")
-    print("[1] Outputs")
-    
-    choice = input("Enter index: ").strip()
-    
+    """Let user select which folder category to inspect."""
+    print("\nSelect folder:")
+    print("\t[0] Raw Data")
+    print("\t[1] Downsampled")
+    print("\t[2] Reclassified")
+
+    choice = input("Enter choice: ").strip()
+
     if choice == "0":
         return DATA_PC_DIR
-    elif choice == "1":
-        return choose_output_subfolder()
-    else:
-        print("[ERROR] Invalid selection.")
-        return None
-
-def choose_output_subfolder():
-    """Let user select which output subfolder to inspect"""
-    print("\n=== Select Output Subfolder ===")
-    print("[0] Downsampled")
-    print("[1] Reclassified")
-    
-    choice = input("Enter index: ").strip()
-    
-    if choice == "0":
+    if choice == "1":
         return OUT_DOWNSAMPLED
-    elif choice == "1":
+    if choice == "2":
         return OUT_RECLASSIFIED
-    else:
-        print("[ERROR] Invalid selection.")
-        return None
+
+    print("[ERROR] Invalid selection.")
+    return None
 
 def inspect_las(las_path):
-    print("\n===================================================")
     print(f"Inspecting: {las_path}")
-    print("===================================================")
-
     las = laspy.read(las_path)
     z = las.z
 
     report_lines = []
-    report_lines.append(f"File: {las_path}")
-    report_lines.append(f"Date: {datetime.now()}")
-    report_lines.append(f"Number of points: {len(las.points)}")
+    report_lines.append(f"\tFile: {las_path}")
+    report_lines.append(f"\tNumber of points: {len(las.points)}")
 
     try:
         crs = las.header.parse_crs()
     except Exception:
         crs = None
-    report_lines.append(f"CRS: {crs}")
+    if crs is None:
+        crs_text = "None"
+    else:
+        epsg = crs.to_epsg()
+        crs_text = f"EPSG:{epsg}" if epsg is not None else str(crs)
+    report_lines.append(f"\tCRS: {crs_text}")
 
-    report_lines.append(f"Point format: {las.header.point_format.id}")
-    report_lines.append(f"LAS version: {las.header.version}")
-    report_lines.append(f"Scales:  {las.header.scales}")
-    report_lines.append(f"Offsets: {las.header.offsets}")
+    report_lines.append(f"\tPoint format: {las.header.point_format.id}")
+    report_lines.append(f"\tLAS version: {las.header.version}")
+    report_lines.append(f"\tScales:  {las.header.scales}")
+    report_lines.append(f"\tZ min: {z.min():.3f}")
+    report_lines.append(f"\tZ max: {z.max():.3f}")
 
-    # Z stats
-    report_lines.append(f"Z min: {z.min():.3f}")
-    report_lines.append(f"Z max: {z.max():.3f}")
-    report_lines.append(f"Z p1:  {np.percentile(z,1):.3f}")
-    report_lines.append(f"Z p5:  {np.percentile(z,5):.3f}")
-    report_lines.append(f"Z p50: {np.percentile(z,50):.3f}")
-    report_lines.append(f"Z p95: {np.percentile(z,95):.3f}")
-    report_lines.append(f"Z p99: {np.percentile(z,99):.3f}")
-
-    # Class histogram
     if hasattr(las, "classification"):
         classes, counts = np.unique(las.classification, return_counts=True)
-        report_lines.append("Classification counts:")
+        report_lines.append("\tClassification counts:")
         for c, n in zip(classes, counts):
-            report_lines.append(f"  Class {int(c)}: {int(n)}")
+            report_lines.append(f"\t  Class {int(c)}: {int(n)}")
     else:
         report_lines.append("No classification field")
 
-    # Bounding box + density
-    xmin, ymin, zmin = las.x.min(), las.y.min(), z.min()
-    xmax, ymax, zmax = las.x.max(), las.y.max(), z.max()
+    xmin, ymin, _ = las.x.min(), las.y.min(), z.min()
+    xmax, ymax, _ = las.x.max(), las.y.max(), z.max()
     area = (xmax - xmin) * (ymax - ymin)
     density = len(z) / area if area > 0 else 0
 
-    report_lines.append(f"XY extent: {xmax-xmin:.2f} x {ymax-ymin:.2f} m")
-    report_lines.append(f"Approx point density: {density:.2f} pts/m²")
+    report_lines.append(f"\tXY extent: {xmax - xmin:.2f} x {ymax - ymin:.2f} m")
+    report_lines.append(f"\tApprox point density: {density:.2f} pts/m2")
 
-    # Print to console
     for line in report_lines:
         print(line)
 
-    # Save TXT report
+    os.makedirs(OUT_INFO, exist_ok=True)
     base = os.path.splitext(os.path.basename(las_path))[0]
     out_txt = os.path.join(OUT_INFO, f"{base}_info.txt")
-
     with open(out_txt, "w", encoding="utf-8") as f:
         for line in report_lines:
             f.write(line + "\n")
 
-    print(f"\n-> Saved LAS report to: {out_txt}")
+    print(f"\t-> Saved LAS report to: {Path(out_txt).parent}")
 
 def main():
-    print("\n=== Inspect LAS File ===")
+    print("\n=== INSPECT LAS FILE ===")
 
-    # NEW: if a LAS path is provided, inspect directly
     if len(sys.argv) >= 2 and os.path.exists(sys.argv[1]):
-        inspect_las(sys.argv[1])
-        ans = input("\nWould you like to visualize this point cloud? [y/N]: ").strip().lower()
-        if ans == "y":
-            subprocess.run([sys.executable, SCRIPT_VISUALIZE, sys.argv[1]])
-        return
+        picked = sys.argv[1]
+    else:
+        folder = choose_folder()
+        if not folder:
+            return
+        files = list_las_files(folder)
+        picked = choose_file(files, "Select LAS file to inspect:", indent_choices=True)
+        if not picked:
+            return
+
+    inspect_las(picked)
+    ans = input("\nWould you like to visualize this point cloud? [y/N]: ").strip().lower()
+    if ans == "y":
+        subprocess.run([sys.executable, SCRIPT_VISUALIZE, picked])
+
 
 if __name__ == "__main__":
     main()

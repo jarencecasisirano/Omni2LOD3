@@ -25,15 +25,16 @@ def list_json_files(folder):
     return sorted(glob.glob(os.path.join(folder, "*.json")))
 
 
-def choose_file(files, prompt):
+def choose_file(files, prompt, indent_choices=True):
     if not files:
         print(f"[ERROR] No files found for: {prompt}")
         return None
     print(f"\n{prompt}")
+    prefix = "\t" if indent_choices else ""
     for i, file_path in enumerate(files):
-        print(f"[{i}] {os.path.basename(file_path)}")
+        print(f"{prefix}[{i}] {os.path.basename(file_path)}")
 
-    choice = input("Enter index: ").strip()
+    choice = input("Enter choice: ").strip()
     if not choice.isdigit():
         print("[ERROR] Invalid selection.")
         return None
@@ -42,6 +43,21 @@ def choose_file(files, prompt):
         print("[ERROR] Invalid selection.")
         return None
     return files[idx]
+
+
+def choose_index(n, prompt, max_index=None, allowed_values=None):
+    choice = input(prompt).strip()
+    if not choice.isdigit():
+        return None
+
+    idx = int(choice)
+    if allowed_values and idx in allowed_values:
+        return idx
+
+    upper = (n - 1) if max_index is None else max_index
+    if idx < 0 or idx > upper:
+        return None
+    return idx
 
 
 def strip_suffix(name, suffixes):

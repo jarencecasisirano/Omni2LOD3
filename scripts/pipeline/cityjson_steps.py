@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import sys
@@ -14,63 +13,16 @@ from utils.paths import (
     SCRIPT_GML,
     SCRIPT_VALIDATE,
 )
+from utils.val3dity_report import load_report_error_codes
 
 # ======================= CITYJSON TO CITYGML PROCESSING =========================
 
 
 def parse_val3dity_codes(report_json_path):
-    if not os.path.exists(report_json_path):
-        return []
     try:
-        with open(report_json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        return sorted(load_report_error_codes(report_json_path))
     except Exception:
         return []
-
-    codes = {}
-
-    def walk(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if isinstance(value, int) and ("error" in key.lower() or "code" in key.lower()):
-                    codes[value] = codes.get(value, 0) + 1
-                else:
-                    walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(data)
-    return sorted(codes.keys())
-
-
-def step_fix_cityjson():
-    json_files = list_json_files(DATA_JSON_DIR)
-    if not json_files:
-        print(f"[ERROR] No CityJSON files found in: {DATA_JSON_DIR}")
-        return None
-
-    input_json = choose_file(json_files, "Select CityJSON file to fix:")
-    if not input_json:
-        return None
-
-    base = os.path.splitext(os.path.basename(input_json))[0]
-    output_json = os.path.join(OUT_LOD2_JSON, f"{base}_fixed.json")
-
-    print("\n=== Running CityJSON fix ===")
-    print(f"Input:  {input_json}")
-    print(f"Output: {output_json}")
-
-    result = subprocess.run([sys.executable, SCRIPT_FIX, input_json, output_json])
-    if result.returncode != 0:
-        print("[ERROR] CityJSON fix failed.")
-        return None
-
-    if not os.path.exists(output_json):
-        print(f"[ERROR] Expected output not created: {output_json}")
-        return None
-
-    return output_json
 
 
 def step_json_to_gml(input_json=None):
@@ -88,10 +40,6 @@ def step_json_to_gml(input_json=None):
     base = os.path.splitext(os.path.basename(input_json))[0]
     output_gml = os.path.join(OUT_LOD2_GML, f"{base}.gml")
 
-    print("\n=== Converting CityJSON to CityGML 2.0 ===")
-    print(f"Input:  {input_json}")
-    print(f"Output: {output_gml}")
-
     result = subprocess.run([sys.executable, SCRIPT_GML, input_json, output_gml])
     if result.returncode != 0:
         print("[ERROR] CityJSON to CityGML failed.")
@@ -106,7 +54,7 @@ def step_json_to_gml(input_json=None):
 
 def step_validate_then_fix():
     max_fix_passes = 5
-    fixable_codes = {102, 204, 902}
+    fixable_codes = {102, 204, 307, 902}
 
     json_files = list_json_files(DATA_JSON_DIR)
     if not json_files:
@@ -122,7 +70,7 @@ def step_validate_then_fix():
     output_json = os.path.join(OUT_LOD2_JSON, f"{base}_FIXED.json")
 
     for i in range(max_fix_passes + 1):
-        print("\n=== Running val3dity validation ===")
+        print(f"\n=== RUN {i + 1}: VAL3DITY FOR VALIDATION ===")
         result = subprocess.run([sys.executable, SCRIPT_VALIDATE, current_json])
 
         if result.returncode == 1:
@@ -130,7 +78,6 @@ def step_validate_then_fix():
             return None
 
         if result.returncode == 0:
-            print("[OK] CityJSON is valid.")
             step_json_to_gml(current_json)
             return current_json
 
@@ -148,17 +95,26 @@ def step_validate_then_fix():
             print("[WARN] Reached max fix passes without a valid file.")
             return None
 
-        print("[WARN] CityJSON is invalid. Running fix...")
+        print("\t[WARN] CityJSON is invalid. Running fix...")
 
         pre_hash = file_hash(current_json)
-
-        print("\n=== Running CityJSON fix ===")
-        print(f"Input:  {current_json}")
+        applied_codes = sorted([code for code in codes if code in fixable_codes]) if codes else []
+        applied_text = ", ".join(str(code) for code in applied_codes) if applied_codes else "auto"
+        print("\n=== RUNNING CITYJSON FIX ===")
         print(f"Output: {output_json}")
+        print(f"Applied fix: {applied_text}")
 
-        result_fix = subprocess.run([sys.executable, SCRIPT_FIX, current_json, output_json])
+        result_fix = subprocess.run(
+            [sys.executable, SCRIPT_FIX, current_json, output_json],
+            capture_output=True,
+            text=True,
+        )
         if result_fix.returncode != 0:
             print("[ERROR] CityJSON fix failed.")
+            if result_fix.stderr and result_fix.stderr.strip():
+                print(result_fix.stderr.strip())
+            elif result_fix.stdout and result_fix.stdout.strip():
+                print(result_fix.stdout.strip())
             return None
 
         if not os.path.exists(output_json):

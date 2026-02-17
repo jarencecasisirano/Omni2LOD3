@@ -59,7 +59,7 @@ def choose_matching_footprint_for_las(las_path, purpose):
     prefix = extract_prefix(las_path).upper()
     if len(matches) == 1:
         print(
-            f"\n[Auto] Using footprint: {os.path.basename(matches[0])} "
+            f"\t-> Auto-selected footprint: {os.path.basename(matches[0])} "
             f"(matched prefix '{prefix}')"
         )
         return matches[0]

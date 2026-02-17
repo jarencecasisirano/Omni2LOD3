@@ -13,9 +13,11 @@ Pipeline-friendly:
 
 import os
 import sys
-import glob
 import subprocess
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.io_helpers import choose_file, list_json_files
 
 # ============================================================
 # Project-relative paths (NO hardcoded C:\ paths)
@@ -52,36 +54,12 @@ def find_citygml_tools_bat() -> Path | None:
 
     return None
 
-def list_json_files(folder: Path) -> list[Path]:
-    if not folder.exists():
-        return []
-    files = sorted([p for p in folder.iterdir() if p.suffix.lower() == ".json"])
-    return files
-
-def choose_file(files: list[Path], prompt: str) -> Path | None:
-    if not files:
-        print(f"[ERROR] No files found for: {prompt}")
-        return None
-    print(f"\n{prompt}")
-    for i, p in enumerate(files):
-        print(f"[{i}] {p.name}")
-    choice = input("Enter index: ").strip()
-    if not choice.isdigit():
-        print("[ERROR] Invalid selection.")
-        return None
-    idx = int(choice)
-    if idx < 0 or idx >= len(files):
-        print("[ERROR] Invalid selection.")
-        return None
-    return files[idx]
-
 def convert_to_citygml2(json_path: Path, output_gml: Path, tools_bat: Path) -> int:
     output_gml.parent.mkdir(parents=True, exist_ok=True)
 
-    print("\n=== Converting CityJSON to CityGML 2.0 ===")
-    print(f"Input:   {json_path}")
-    print(f"Output:  {output_gml}")
-    print(f"Tool:    {tools_bat}")
+    print("\n=== CONVERTING CITYJSON TO CITYGML 2.0 ===")
+    print(f"Input:  {json_path}")
+    print(f"Tool:   {tools_bat}")
 
     cmd = [
         str(tools_bat),
@@ -108,8 +86,8 @@ def convert_to_citygml2(json_path: Path, output_gml: Path, tools_bat: Path) -> i
             print("\n[ERROR] Tool reported success but output file was not created.")
             return 2
 
-        print("\n✓ SUCCESS! CityGML 2.0 saved:")
-        print(f"  {output_gml}")
+        print("\t✓ SUCCESS! CityGML 2.0 saved:")
+        print(f"\t{output_gml}")
         return 0
 
     except FileNotFoundError:
@@ -146,14 +124,15 @@ def main():
         print(f"[ERROR] Folder not found: {DEFAULT_JSON_DIR}")
         sys.exit(1)
 
-    json_files = list_json_files(DEFAULT_JSON_DIR)
+    json_files = [Path(p) for p in list_json_files(DEFAULT_JSON_DIR)]
     if not json_files:
         print(f"[ERROR] No .json files found in: {DEFAULT_JSON_DIR}")
         sys.exit(1)
 
-    picked = choose_file(json_files, "Select fixed CityJSON to convert to CityGML:")
+    picked = choose_file([str(p) for p in json_files], "Select fixed CityJSON to convert to CityGML:")
     if not picked:
         sys.exit(1)
+    picked = Path(picked)
 
     DEFAULT_GML_DIR.mkdir(parents=True, exist_ok=True)
     output_gml = DEFAULT_GML_DIR / f"{picked.stem}.gml"

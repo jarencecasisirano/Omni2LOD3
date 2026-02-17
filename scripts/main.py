@@ -10,15 +10,15 @@ from utils.paths import SCRIPT_INSPECT, SCRIPT_VISUALIZE
 def main():
     ensure_dirs()
 
-    print("\n=== Omni2LOD3 ===")
+    print("\n=== OMNI2LOD3 ===")
     print("Which part of the pipeline would you like to start with?")
-    print("[0] Inspect Point Cloud")
-    print("[1] Voxel Downsample")
-    print("[2] Reclassify Point Cloud")
-    print("[3] Validate via Val3dity")
-    print("[4] Convert CityJSON to CityGML 2.0")
-    print("[V] Visualize point cloud")
-    print("[Q] Quit")
+    print("\t[0] Inspect Point Cloud")
+    print("\t[1] Voxel Downsample")
+    print("\t[2] Reclassify Point Cloud")
+    print("\t[3] Validate via Val3dity")
+    print("\t[4] Convert CityJSON to CityGML 2.0")
+    print("\t[V] Visualize point cloud")
+    print("\t[Q] Quit")
 
     choice = input("Enter choice: ").strip().lower()
 

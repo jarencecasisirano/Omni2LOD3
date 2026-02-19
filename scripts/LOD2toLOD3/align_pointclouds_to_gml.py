@@ -479,60 +479,170 @@ def load_las_pointcloud(las_file: str) -> o3d.geometry.PointCloud:
     return pcd
 
 
-def interactive_wall_selection(wall_surfaces: List[WallSurface], 
+def build_wall_color_map(wall_surfaces: List[WallSurface]):
+    """
+    Assign a visually distinct HSV colour to every wall surface.
+
+    Returns:
+        List of (index, rgb_tuple_0_1, WallSurface) — same order as wall_surfaces.
+    """
+    import colorsys
+    color_map = []
+    for i, wall in enumerate(wall_surfaces):
+        hue = (i * 0.618033988749895) % 1.0  # Golden-ratio spacing
+        rgb = colorsys.hsv_to_rgb(hue, 0.75, 0.90)
+        color_map.append((i, rgb, wall))
+    return color_map
+
+
+def visualize_wall_surfaces(wall_surfaces: List[WallSurface],
+                            density: float = 0.05,
+                            show_viewer: bool = True) -> list:
+    """
+    Print a colour-coded terminal legend for all wall surfaces and
+    (optionally) open an Open3D viewer with matching colours.
+
+    Each wall gets a unique HSV colour. Red spheres mark surface centres.
+
+    Args:
+        wall_surfaces: List of WallSurface objects.
+        density:       Point sampling density for the viewer mesh.
+        show_viewer:   If True, open the Open3D window (blocks until closed).
+
+    Returns:
+        color_map  list of (index, rgb, WallSurface)
+    """
+    color_map = build_wall_color_map(wall_surfaces)
+
+    # ------------------------------------------------------------------
+    # Terminal legend
+    # ------------------------------------------------------------------
+    print(f"\n{'='*80}")
+    print("WALL SURFACE COLOR LEGEND")
+    print(f"{'='*80}")
+    print(f"  Total surfaces: {len(wall_surfaces)}")
+    print(f"  Colours match the 3D viewer. Red spheres mark each wall's centre.\n")
+
+    for idx, rgb, wall in color_map:
+        r, g, b = int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
+        # ANSI 24-bit true-colour swatch
+        swatch = f"\033[48;2;{r};{g};{b}m   \033[0m"
+        center = wall.get_center()
+        dims   = wall.get_dimensions()
+        print(f"  {swatch} [{idx:>3d}] {wall.id[:40]:<40}  "
+              f"ctr=({center[0]:.1f},{center[1]:.1f},{center[2]:.1f})  "
+              f"W={dims[0]:.1f} H={dims[1]:.1f} D={dims[2]:.1f}")
+
+    print(f"\n{'='*80}")
+    print("  🔴 Red spheres = wall centres   |   🌈 Surface colour = index colour")
+    print(f"{'='*80}\n")
+
+    # ------------------------------------------------------------------
+    # Open3D viewer
+    # ------------------------------------------------------------------
+    if show_viewer:
+        geometries = []
+        for idx, rgb, wall in color_map:
+            pcd = wall.to_pointcloud(density=density)
+            pcd.paint_uniform_color(list(rgb))
+            geometries.append(pcd)
+
+            center = wall.get_center()
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.4)
+            sphere.translate(center)
+            sphere.paint_uniform_color([1.0, 0.0, 0.0])
+            geometries.append(sphere)
+
+        print("  Opening 3D viewer — close the window to continue...")
+        o3d.visualization.draw_geometries(
+            geometries,
+            window_name=f"GML WallSurfaces — {len(wall_surfaces)} walls (close to continue)",
+            width=1400, height=800,
+        )
+
+    return color_map
+
+
+def interactive_wall_selection(wall_surfaces: List[WallSurface],
                                pointcloud_files: List[str]) -> Dict[str, int]:
     """
-    Interactive tool for user to select which wall corresponds to each point cloud.
-    
+    Interactive tool for the user to map each point cloud to a wall surface.
+
+    Automatically shows the colour-coded 3D viewer + terminal legend first so
+    the user can inspect the building before entering index numbers.
+
     Args:
-        wall_surfaces: List of WallSurface objects
-        pointcloud_files: List of point cloud file paths
-        
+        wall_surfaces:    List of WallSurface objects.
+        pointcloud_files: List of point cloud file paths.
+
     Returns:
-        Dictionary mapping point cloud filename to wall surface index
+        Dictionary mapping point cloud filename → wall surface index.
     """
     print("\n" + "=" * 80)
     print("INTERACTIVE WALL SURFACE SELECTION")
     print("=" * 80)
-    
-    print("\nAvailable WallSurfaces:")
-    for i, wall in enumerate(wall_surfaces):
+
+    # Show the colour-coded viewer + legend BEFORE asking for input
+    color_map = visualize_wall_surfaces(wall_surfaces, density=0.05, show_viewer=True)
+
+    # Build a compact one-line reference that will be reprinted for each file
+    def _legend_line(idx, rgb, wall):
+        r, g, b = int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
+        swatch = f"\033[48;2;{r};{g};{b}m   \033[0m"
         center = wall.get_center()
-        dims = wall.get_dimensions()
-        print(f"  [{i}] {wall.id}")
-        print(f"      Center: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f})")
-        print(f"      Dimensions: W={dims[0]:.2f}, H={dims[1]:.2f}, D={dims[2]:.2f}")
-    
+        return (f"  {swatch} [{idx:>3d}] {wall.id[:35]:<35}  "
+                f"ctr=({center[0]:.1f},{center[1]:.1f},{center[2]:.1f})")
+
+    compact_legend = [_legend_line(idx, rgb, w) for idx, rgb, w in color_map]
+
     mapping = {}
-    
-    print("\nPoint clouds to align:")
+
     for pc_file in pointcloud_files:
         filename = os.path.basename(pc_file)
-        print(f"\n  File: {filename}")
-        
+
+        print(f"\n{'─'*80}")
+        print(f"  Point cloud: {filename}")
+        print(f"{'─'*80}")
+        # Reprint the compact colour legend so the user never has to scroll
+        print("  Wall legend (colours match 3D viewer):")
+        for line in compact_legend:
+            print(line)
+        print()
+
         while True:
             try:
-                response = input(f"    Select wall index for {filename} (0-{len(wall_surfaces)-1}, or 's' to skip): ")
-                
+                response = input(
+                    f"  Select wall index for '{filename}'  "
+                    f"(0–{len(wall_surfaces)-1}  |  's' to skip  |  'v' to reopen viewer): "
+                ).strip()
+
                 if response.lower() == 's':
-                    print(f"    Skipping {filename}")
+                    print(f"  ⏭  Skipping {filename}")
                     break
-                
+
+                if response.lower() == 'v':
+                    visualize_wall_surfaces(wall_surfaces, density=0.05, show_viewer=True)
+                    continue
+
                 wall_idx = int(response)
                 if 0 <= wall_idx < len(wall_surfaces):
+                    _, rgb, _ = color_map[wall_idx]
+                    r, g, b = int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
+                    swatch = f"\033[48;2;{r};{g};{b}m   \033[0m"
+                    print(f"  ✓ {swatch} Mapped '{filename}' → [{wall_idx}] {wall_surfaces[wall_idx].id}")
                     mapping[filename] = wall_idx
-                    print(f"    ✓ Mapped {filename} → WallSurface [{wall_idx}] {wall_surfaces[wall_idx].id}")
                     break
                 else:
-                    print(f"    Invalid index. Please enter 0-{len(wall_surfaces)-1}")
+                    print(f"  Invalid index. Enter 0–{len(wall_surfaces)-1}.")
+
             except ValueError:
-                print("    Invalid input. Please enter a number or 's' to skip.")
-    
+                print("  Invalid input. Enter a number, 's' to skip, or 'v' to reopen viewer.")
+
     print("\n" + "=" * 80)
-    print(f"Mapping complete: {len(mapping)} point clouds mapped")
+    print(f"  Mapping complete: {len(mapping)} point cloud(s) mapped")
     print("=" * 80 + "\n")
-    
     return mapping
+
 
 
 def compute_scale_factor(source_pcd: o3d.geometry.PointCloud,
@@ -668,15 +778,16 @@ def save_aligned_pointcloud(pcd: o3d.geometry.PointCloud, output_path: str, orig
     original_las = laspy.read(original_las_path)
     
     # Create new LAS with same header
-    header = laspy.LasHeader(point_format=original_las.header.point_format, 
-                            version=original_las.header.version)
-    header.scales = original_las.header.scales
-    header.offsets = original_las.header.offsets
-    
-    new_las = laspy.LasData(header)
-    
-    # Set coordinates from aligned point cloud
+    header = laspy.LasHeader(point_format=original_las.header.point_format,
+                             version=original_las.header.version)
+    # Recompute offset and scale from the ALIGNED points.
+    # The original header offset is no longer valid after the cloud has been
+    # moved to UTM/GML space, which causes OverflowError if we reuse it.
     points = np.asarray(pcd.points)
+    header.offsets = np.min(points, axis=0)          # shift origin to min corner
+    header.scales  = np.array([0.001, 0.001, 0.001]) # 1 mm precision
+
+    new_las = laspy.LasData(header)
     new_las.x = points[:, 0]
     new_las.y = points[:, 1]
     new_las.z = points[:, 2]
@@ -760,71 +871,9 @@ def main():
             distance_threshold=args.distance_threshold
         )
     
-    # Visualize walls if requested
+    # Visualize walls if requested (--visualize_walls flag)
     if args.visualize_walls:
-        print("\nPreparing wall surface visualization with color-coded index markers...")
-        geometries = []
-        
-        # Create a color map for better distinction
-        import colorsys
-        
-        # Store colors for legend
-        color_map = []
-        
-        for i, wall in enumerate(wall_surfaces):
-            # Create wall point cloud
-            pcd = wall.to_pointcloud(density=0.05)
-            
-            # Assign color based on index using HSV color wheel
-            hue = (i * 0.618033988749895) % 1.0  # Golden ratio for good distribution
-            rgb = colorsys.hsv_to_rgb(hue, 0.7, 0.9)
-            pcd.paint_uniform_color(rgb)
-            geometries.append(pcd)
-            
-            # Store color for legend
-            color_map.append((i, rgb, wall))
-            
-            # Add a sphere marker at the center
-            center = wall.get_center()
-            marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.5)
-            marker.translate(center)
-            marker.paint_uniform_color([1, 0, 0])  # Red markers
-            geometries.append(marker)
-        
-        # Print color legend with ANSI colors
-        print(f"\n{'='*80}")
-        print(f"WALL SURFACE COLOR LEGEND")
-        print(f"{'='*80}")
-        print(f"Total surfaces: {len(wall_surfaces)}\n")
-        print(f"Each wall surface has a unique color. Match the colors below to the 3D view:")
-        print(f"{'='*80}\n")
-        
-        # Print color legend with actual colors (using ANSI escape codes)
-        for idx, rgb, wall in color_map:
-            # Convert RGB (0-1) to RGB (0-255) for ANSI
-            r, g, b = int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
-            
-            # ANSI escape code for 24-bit true color
-            color_block = f"\033[48;2;{r};{g};{b}m   \033[0m"
-            
-            center = wall.get_center()
-            # Print with color block
-            print(f"  {color_block} [{idx:3d}] {wall.id[:45]:<45} @ ({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f})")
-        
-        print(f"\n{'='*80}")
-        print(f"VISUALIZATION GUIDE:")
-        print(f"{'='*80}")
-        print(f"🔴 RED SPHERES = Wall surface centers")
-        print(f"🌈 COLORED SURFACES = Each wall (match colors to legend above)")
-        print(f"\nHow to identify walls:")
-        print(f"  1. Look at the color legend above")
-        print(f"  2. Find the matching colored surface in the 3D viewer")
-        print(f"  3. The red sphere marks its center position")
-        print(f"{'='*80}\n")
-        
-        o3d.visualization.draw_geometries(geometries, 
-                                         window_name=f"GML WallSurfaces ({len(wall_surfaces)} walls)",
-                                         width=1280, height=720)
+        visualize_wall_surfaces(wall_surfaces, density=0.05, show_viewer=True)
         return
     
     # Select point cloud directory if not provided

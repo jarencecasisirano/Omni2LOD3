@@ -31,6 +31,24 @@ def parse_val3dity_codes(report_json_path):
         return []
 
 
+def _run_and_echo(cmd):
+    """Run a subprocess and print its output once to avoid console interleaving noise."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    out = (result.stdout or "").rstrip()
+    err = (result.stderr or "").rstrip()
+    if out:
+        print(out)
+    if result.returncode != 0 and err:
+        print(err)
+    return result
+
+
+def _schema_then_convert(current_json):
+    schema_json = step_schema_then_fix(current_json)
+    step_json_to_gml(schema_json)
+    return schema_json
+
+
 def step_json_to_gml(input_json=None):
     if input_json is None:
         json_files = list_json_files(OUT_LOD2_JSON)
@@ -47,7 +65,7 @@ def step_json_to_gml(input_json=None):
     output_stem = gml_stem_from_json(input_json)
     output_gml = os.path.join(output_dir, f"{output_stem}.gml")
 
-    result = subprocess.run([sys.executable, SCRIPT_GML, input_json, output_gml])
+    result = _run_and_echo([sys.executable, SCRIPT_GML, input_json, output_gml])
     if result.returncode != 0:
         print("[ERROR] CityJSON to CityGML failed.")
         return None
@@ -63,13 +81,13 @@ def step_schema_then_fix(input_json):
     output_dir = prefix_dir(OUT_LOD2_JSON, input_json)
     output_json = os.path.join(output_dir, f"{schema_fixed_stem(input_json)}.json")
 
-    result = subprocess.run(
+    result = _run_and_echo(
         [
             sys.executable,
             SCRIPT_SCHEMA_FIX,
             input_json,
             output_json,
-        ],
+        ]
     )
 
     if result.returncode != 0:
@@ -113,9 +131,7 @@ def step_validate_then_fix():
             return None
 
         if result.returncode == 0:
-            schema_json = step_schema_then_fix(current_json)
-            step_json_to_gml(schema_json)
-            return schema_json
+            return _schema_then_convert(current_json)
 
         if result.returncode != 2:
             print("[ERROR] Unexpected validation exit code.")
@@ -134,9 +150,7 @@ def step_validate_then_fix():
                     "remains interpretable for LoD2 use."
                 )
                 print("[NOTE] Proceeding to CityGML conversion with this documented limitation.")
-                schema_json = step_schema_then_fix(current_json)
-                step_json_to_gml(schema_json)
-                return schema_json
+                return _schema_then_convert(current_json)
             if not any_fixable:
                 print(f"[WARN] No additional fixable codes found: {codes}")
                 print(
@@ -144,20 +158,16 @@ def step_validate_then_fix():
                     "geometry is retained as interpretable for intended LoD2 use."
                 )
                 print("[NOTE] Proceeding to CityGML conversion with documented limitations.")
-                schema_json = step_schema_then_fix(current_json)
-                step_json_to_gml(schema_json)
-                return schema_json
+                return _schema_then_convert(current_json)
 
         if i == max_fix_passes:
             print("[WARN] Reached max fix passes without a fully valid file.")
             print(
                 "[NOTE] Remaining issues are treated as source-modeling limitations; "
-                "geometry is retained as interpretable for intended LoD2 use."
+                "geometry is retained as interpretable for intended LOD3 use."
             )
             print("[NOTE] Proceeding to CityGML conversion with documented limitations.")
-            schema_json = step_schema_then_fix(current_json)
-            step_json_to_gml(schema_json)
-            return schema_json
+            return _schema_then_convert(current_json)
 
         print("\t[WARN] CityJSON is invalid. Running fix...")
 
@@ -192,9 +202,7 @@ def step_validate_then_fix():
             print("[WARN] Fix produced no changes.")
             convert_anyway = input("Convert to CityGML anyway? [y/N]: ").strip().lower()
             if convert_anyway in {"y", "yes"}:
-                schema_json = step_schema_then_fix(current_json)
-                step_json_to_gml(schema_json)
-                return schema_json
+                return _schema_then_convert(current_json)
             print("[WARN] Stopping.")
             return None
 

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from utils.io_helpers import choose_file, file_hash, list_json_files
+from utils.las_helpers import extract_prefix
 from utils.paths import (
     DATA_JSON_DIR,
     OUT_LOD2_GML,
@@ -14,7 +15,7 @@ from utils.paths import (
     SCRIPT_SCHEMA_FIX,
     SCRIPT_VALIDATE,
 )
-from utils.val3dity_report import load_report_error_codes
+from utils.val3dity.report import load_report_error_codes
 
 # ======================= CITYJSON TO CITYGML PROCESSING =========================
 
@@ -24,6 +25,33 @@ def parse_val3dity_codes(report_json_path):
         return sorted(load_report_error_codes(report_json_path))
     except Exception:
         return []
+
+
+def _prefix_dir(base_dir, file_path):
+    prefix = extract_prefix(file_path).upper()
+    out_dir = os.path.join(base_dir, prefix)
+    os.makedirs(out_dir, exist_ok=True)
+    return out_dir
+
+
+def _schema_fixed_stem(source_path):
+    base = os.path.splitext(os.path.basename(source_path))[0]
+    if base.endswith("_FIXED"):
+        return f"{base[:-6]}_SCHEMA_FIXED"
+    return f"{base}_SCHEMA_FIXED"
+
+
+def _gml_stem_from_json(source_path):
+    base = os.path.splitext(os.path.basename(source_path))[0]
+    if base.endswith("_SCHEMA_FIXED"):
+        return base[:-13]
+    return base
+
+
+def _val3dity_report_json_path(source_json):
+    report_dir = _prefix_dir(OUT_VAL3DITY, source_json)
+    stem = Path(source_json).stem
+    return os.path.join(report_dir, f"{stem}_val3dity.json")
 
 
 def step_json_to_gml(input_json=None):
@@ -38,8 +66,9 @@ def step_json_to_gml(input_json=None):
         if not input_json:
             return None
 
-    base = os.path.splitext(os.path.basename(input_json))[0]
-    output_gml = os.path.join(OUT_LOD2_GML, f"{base}.gml")
+    output_dir = _prefix_dir(OUT_LOD2_GML, input_json)
+    output_stem = _gml_stem_from_json(input_json)
+    output_gml = os.path.join(output_dir, f"{output_stem}.gml")
 
     result = subprocess.run([sys.executable, SCRIPT_GML, input_json, output_gml])
     if result.returncode != 0:
@@ -54,8 +83,8 @@ def step_json_to_gml(input_json=None):
 
 
 def step_schema_then_fix(input_json):
-    base = os.path.splitext(os.path.basename(input_json))[0]
-    output_json = os.path.join(OUT_LOD2_JSON, f"{base}_SCHEMA_FIXED.json")
+    output_dir = _prefix_dir(OUT_LOD2_JSON, input_json)
+    output_json = os.path.join(output_dir, f"{_schema_fixed_stem(input_json)}.json")
 
     result = subprocess.run(
         [
@@ -95,7 +124,8 @@ def step_validate_then_fix():
 
     current_json = input_json
     base = os.path.splitext(os.path.basename(input_json))[0]
-    output_json = os.path.join(OUT_LOD2_JSON, f"{base}_FIXED.json")
+    output_dir = _prefix_dir(OUT_LOD2_JSON, input_json)
+    output_json = os.path.join(output_dir, f"{base}_FIXED.json")
 
     for i in range(max_fix_passes + 1):
         print(f"\n=== RUN {i + 1}: VAL3DITY FOR VALIDATION ===")
@@ -114,7 +144,7 @@ def step_validate_then_fix():
             print("[ERROR] Unexpected validation exit code.")
             return None
 
-        report_json = os.path.join(OUT_VAL3DITY, f"{Path(current_json).stem}_val3dity.json")
+        report_json = _val3dity_report_json_path(current_json)
         codes = parse_val3dity_codes(report_json)
         if codes:
             only_convertible_invalid = all(code in convertible_invalid_codes for code in codes)

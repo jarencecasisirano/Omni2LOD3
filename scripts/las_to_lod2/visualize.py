@@ -1,4 +1,8 @@
 # visualize.py
+"""
+CLI mode:
+  python visualize.py <input_las>
+"""
 import sys
 from pathlib import Path
 

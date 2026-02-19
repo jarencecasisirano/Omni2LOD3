@@ -3,10 +3,9 @@ import os
 from datetime import date
 from pathlib import Path
 
-from utils.paths import OUT_INFO
-
-
-SCHEMA_PROFILE_PATH = Path(OUT_INFO) / "schema_identity.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SCHEMA_PROFILE_PATH = PROJECT_ROOT / "scripts" / "utils" / "schema" / "schema_identity.json"
+LEGACY_SCHEMA_PROFILE_PATH = PROJECT_ROOT / "outputs" / "00_las_info" / "schema_identity.json"
 
 
 def is_iso_date(text):
@@ -23,6 +22,16 @@ def is_iso_date(text):
 
 
 def load_schema_profile():
+    if not SCHEMA_PROFILE_PATH.exists() and LEGACY_SCHEMA_PROFILE_PATH.exists():
+        try:
+            SCHEMA_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SCHEMA_PROFILE_PATH.write_text(
+                LEGACY_SCHEMA_PROFILE_PATH.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     if not SCHEMA_PROFILE_PATH.exists():
         return None
     try:

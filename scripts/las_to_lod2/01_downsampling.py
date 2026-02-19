@@ -1,4 +1,8 @@
 # 01_downsampling.py
+"""
+CLI mode:
+  python 01_downsampling.py <input_las> <output_las> <voxel_size>
+"""
 import sys
 import time
 from pathlib import Path
@@ -10,7 +14,6 @@ from sklearn.neighbors import KDTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.loading import create_bar
-
 
 def _parse_args(argv):
     if len(argv) < 4:
@@ -75,7 +78,6 @@ def main():
 
     end_time = time.time()
     print(f"=== Done! Downsampling finished in {end_time - start_time:.2f} seconds ===")
-
 
 if __name__ == "__main__":
     main()

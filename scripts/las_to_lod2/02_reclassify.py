@@ -1,4 +1,8 @@
 # 02_reclassify.py
+"""
+CLI mode:
+  python 02_reclassify.py <input_las> <footprint_shp> <output_las>
+"""
 import os
 import sys
 import numpy as np
@@ -30,7 +34,7 @@ def main():
 
     gdf = gpd.read_file(footprint_shp)
     if gdf.empty:
-        print("[ERROR] Footprint shapefile is empty.")
+        print("\t[ERROR] Footprint shapefile is empty.")
         sys.exit(1)
 
     las_crs = las.header.parse_crs()
@@ -40,7 +44,7 @@ def main():
 
     footprints = [geom.buffer(0) for geom in gdf.geometry.values if geom is not None and not geom.is_empty]
     if not footprints:
-        print("[ERROR] No valid footprint geometry found.")
+        print("\t\t[ERROR] No valid footprint geometry found.")
         sys.exit(1)
 
     n_total = len(X)
@@ -84,8 +88,8 @@ def main():
 
     inside_total = int(inside_any.sum())
     if inside_total == 0:
-        print("\n[INFO] No points detected inside footprint. Stopping process.")
-        print("[INFO] No output LAS written.")
+        print("\t\t[INFO] No points detected inside footprint. Stopping process.")
+        print("\t\t[INFO] No output LAS written.")
         sys.exit(0)
 
     os.makedirs(os.path.dirname(las_output) or ".", exist_ok=True)

@@ -100,8 +100,7 @@ def step_assign_building_class(input_las=None):
     print("Point cloud is now ready for CityForge processing.")
     output_las_rel = os.path.relpath(output_las, PROJECT_ROOT)
     print(f"\t[1] Run CityForge using: {output_las_rel}")
-    print(f"\t[2] Save/export the resulting CityJSON into: {DATA_JSON_DIR}")
-    print("\t[3] Run menu option [3]")
-    print()
+    print(f"\t[2] Export the resulting CityJSON into: {DATA_JSON_DIR}")
+    print("\t[3] Run main menu option [3]")
 
     return output_las

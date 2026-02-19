@@ -1,4 +1,8 @@
 # inspect_las.py
+"""
+CLI mode:
+  python inspect_las.py <input_las>
+"""
 import os
 import subprocess
 import sys
@@ -17,7 +21,6 @@ from utils.paths import (
     OUT_RECLASSIFIED,
     SCRIPT_VISUALIZE,
 )
-
 
 def choose_folder():
     """Let user select which folder category to inspect."""

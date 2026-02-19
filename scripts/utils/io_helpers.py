@@ -13,16 +13,16 @@ def ensure_dirs():
 
 
 def list_las_files(folder):
-    files = sorted(glob.glob(os.path.join(folder, "*.las")))
+    files = sorted(glob.glob(os.path.join(folder, "**", "*.las"), recursive=True))
     return [f for f in files if not f.lower().endswith(".copc.las")]
 
 
 def list_shp_files(folder):
-    return sorted(glob.glob(os.path.join(folder, "*.shp")))
+    return sorted(glob.glob(os.path.join(folder, "**", "*.shp"), recursive=True))
 
 
 def list_json_files(folder):
-    return sorted(glob.glob(os.path.join(folder, "*.json")))
+    return sorted(glob.glob(os.path.join(folder, "**", "*.json"), recursive=True))
 
 
 def choose_file(files, prompt, indent_choices=True):

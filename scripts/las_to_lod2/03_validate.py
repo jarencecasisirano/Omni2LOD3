@@ -1,4 +1,8 @@
 # 03_validate.py
+"""
+CLI mode:
+  python 03_validate.py <input_json>
+"""
 import re
 import sys
 import subprocess
@@ -6,10 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.io_helpers import choose_index, list_json_files
+from utils.las_helpers import extract_prefix
 
-# -------------------------
-# Path defaults (relative to repo)
-# -------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
@@ -17,17 +19,21 @@ DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "03_json_model"
 REPORT_DIR = PROJECT_ROOT / "outputs" / "03_val3dity"
 VAL3DITY_EXE = PROJECT_ROOT / "tools" / "val3dity" / "val3dity-win64" / "val3dity.exe"
 
-# Exit codes
 EXIT_VALID = 0
 EXIT_INVALID = 2
 EXIT_FAILURE = 1
 
+def _print_failure_help():
+    print("\t[INFO] Validation could not be completed (tool/runtime/parsing issue),")
+    print("\tnot a confirmed geometry INVALID result.")
+
+
+def _print_failure_help_tool():
+    print(f"\t[INFO] Expected val3dity executable: {VAL3DITY_EXE}")
+    print("\t[INFO] Try reinstalling val3dity if needed:")
+    print("\thttps://github.com/tudelft3d/val3dity")
 
 def _parse_validity(output_text: str):
-    """
-    Parse val3dity summary output.
-    Returns EXIT_VALID / EXIT_INVALID / EXIT_FAILURE.
-    """
     for line in output_text.splitlines():
         if re.search(r"^\s*INVALID\b", line, re.IGNORECASE):
             return EXIT_INVALID
@@ -74,20 +80,25 @@ def _print_validation_summary(in_path: Path, report_txt_path: Path, status: int)
                 print(f"\t{line}")
         return
     print("\tResult: FAILURE")
+    _print_failure_help()
 
 
 def run_val3dity(input_path: Path):
     if not VAL3DITY_EXE.exists():
         print(f"[ERROR] val3dity.exe not found: {VAL3DITY_EXE}")
+        _print_failure_help()
+        _print_failure_help_tool()
         return EXIT_FAILURE, None, None
 
     if not input_path.exists():
         print(f"[ERROR] Input JSON not found: {input_path}")
+        _print_failure_help()
         return EXIT_FAILURE, None, None
 
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    report_txt_path = REPORT_DIR / f"{input_path.stem}_val3dity.txt"
-    report_json_path = REPORT_DIR / f"{input_path.stem}_val3dity.json"
+    prefix_dir = REPORT_DIR / extract_prefix(str(input_path)).upper()
+    prefix_dir.mkdir(parents=True, exist_ok=True)
+    report_txt_path = prefix_dir / f"{input_path.stem}_val3dity.txt"
+    report_json_path = prefix_dir / f"{input_path.stem}_val3dity.json"
 
     cmd = [str(VAL3DITY_EXE), str(input_path), "--report", str(report_json_path)]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -100,9 +111,14 @@ def run_val3dity(input_path: Path):
 
     if result.returncode != 0:
         print(f"[ERROR] val3dity failed with exit code {result.returncode}")
+        _print_failure_help()
+        _print_failure_help_tool()
         return EXIT_FAILURE, report_txt_path, report_json_path
 
     status = _parse_validity(combined)
+    if status == EXIT_FAILURE:
+        print("[ERROR] Could not parse VALID/INVALID status from val3dity output.")
+        _print_failure_help()
     return status, report_txt_path, report_json_path
 
 
@@ -116,6 +132,7 @@ def main():
         else:
             print(f"Input:  {in_path}")
             print("Result: FAILURE")
+            _print_failure_help()
         sys.exit(status)
 
     # Interactive mode
@@ -145,6 +162,7 @@ def main():
     else:
         print(f"Input:  {in_path}")
         print("Result: FAILURE")
+        _print_failure_help()
     sys.exit(status)
 
 

@@ -1,3 +1,8 @@
+# 04_schema_fix.py
+"""
+CLI mode:
+  python 04_schema_fix.py <input_json> <output_json>
+"""
 import json
 import os
 import subprocess
@@ -5,12 +10,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils.schema_profile import resolve_schema_defaults
-
+from utils.schema.profile import resolve_schema_defaults
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
-
 
 def _rel(pathlike):
     p = Path(pathlike)
@@ -44,7 +47,7 @@ def _combined_text(run_result):
 
 def _parse_cjio_sections(run_result):
     """
-    Parse cjio validate sections like:
+    Parsing their output validate sections:
       === json_syntax ===
       ok
       === schema ===
@@ -161,9 +164,9 @@ def main():
         )
     else:
         print(f"Applied schema metadata fix for input \"{Path(input_path).name}\": no")
-    print(f"JSON syntax:      {json_status}")
-    print(f"CityJSON schema:  {schema_status}")
-    print(f"Output:           {_rel(output_path)}")
+    print(f"\tJSON syntax:      {json_status}")
+    print(f"\tCityJSON schema:  {schema_status}")
+    print(f"\tOutput:           {_rel(output_path)}")
     if check is None:
         print("[WARN] cjio command is unavailable in this Python environment.")
         print("[WARN] Activate the environment where cjio/cjvalpy are installed.")
@@ -171,4 +174,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

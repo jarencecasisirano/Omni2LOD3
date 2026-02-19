@@ -1,14 +1,7 @@
 # 06_json_to_gml2.py
 """
-Convert CityJSON -> CityGML 2.0 using citygml-tools (from-cityjson).
-
-Pipeline-friendly:
-- CLI mode (used by main.py):
+CLI mode (used by main.py):
     python 06_json_to_gml2.py <input_json> <output_gml>
-
-- Interactive mode (no args):
-    - lists JSON in outputs/04_LOD2_json
-    - writes GML to outputs/05_LOD2_gml
 """
 
 import os
@@ -18,20 +11,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.io_helpers import choose_file, list_json_files
+from utils.las_helpers import extract_prefix
 
-# ============================================================
-# Project-relative paths (NO hardcoded C:\ paths)
-# ============================================================
 
-SCRIPT_DIR = Path(__file__).resolve().parent                  # .../scripts/las_to_lod2
-PROJECT_ROOT = SCRIPT_DIR.parent.parent                       # .../Omni2LOD3
+SCRIPT_DIR = Path(__file__).resolve().parent                  
+PROJECT_ROOT = SCRIPT_DIR.parent.parent                       
 
 DEFAULT_JSON_DIR = PROJECT_ROOT / "outputs" / "04_LOD2_json"
 DEFAULT_GML_DIR  = PROJECT_ROOT / "outputs" / "05_LOD2_gml"
 
-# Optional: allow user to override tool location via env var
 ENV_BAT = os.environ.get("CITYGML_TOOLS_BAT", "").strip()
-
 
 def _rel(pathlike):
     p = Path(pathlike)
@@ -40,13 +29,21 @@ def _rel(pathlike):
     except Exception:
         return str(p)
 
+
+def _gml_stem_from_json(pathlike):
+    base = Path(pathlike).stem
+    if base.endswith("_SCHEMA_FIXED"):
+        return base[:-13]
+    return base
+
+
+def _prefix_dir_for_json(base_dir, json_path):
+    prefix = extract_prefix(str(json_path)).upper()
+    out_dir = Path(base_dir) / prefix
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
 def find_citygml_tools_bat() -> Path | None:
-    """
-    Find citygml-tools.bat.
-    Priority:
-      1) env var CITYGML_TOOLS_BAT
-      2) PROJECT_ROOT/tools/**/citygml-tools.bat
-    """
     if ENV_BAT:
         p = Path(ENV_BAT)
         if p.exists():
@@ -78,20 +75,19 @@ def convert_to_citygml2(json_path: Path, output_gml: Path, tools_bat: Path) -> i
     ]
 
     try:
-        # capture_output=True hides tool logs; set to False if you want live logs
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            print("\n[ERROR] citygml-tools failed.")
+            print("\n\t[ERROR] citygml-tools failed.")
             if result.stdout.strip():
-                print("\n--- stdout ---")
+                print("\n\t--- stdout ---")
                 print(result.stdout)
             if result.stderr.strip():
-                print("\n--- stderr ---")
+                print("\n\t--- stderr ---")
                 print(result.stderr)
             return result.returncode
 
         if not output_gml.exists():
-            print("\n[ERROR] Tool reported success but output file was not created.")
+            print("\n\t[ERROR] Tool reported success but output file was not created.")
             return 2
 
         print("\tSUCCESS! CityGML 2.0 saved:")
@@ -105,16 +101,13 @@ def convert_to_citygml2(json_path: Path, output_gml: Path, tools_bat: Path) -> i
 def main():
     tools_bat = find_citygml_tools_bat()
     if tools_bat is None:
-        print("[ERROR] Could not find citygml-tools.bat.")
-        print("Fix options:")
-        print("  1) Put citygml-tools under: <PROJECT_ROOT>/tools/")
-        print("  2) Or set env var CITYGML_TOOLS_BAT to the .bat path")
+        print("[\tERROR] Could not find citygml-tools.bat.")
+        print("\tFix options:")
+        print("\t  1) Put citygml-tools under: <PROJECT_ROOT>/tools/")
+        print("\t  2) Or set env var CITYGML_TOOLS_BAT to the .bat path")
         sys.exit(1)
 
-    # ------------------------------------------------------------
-    # CLI mode for main.py
-    # ------------------------------------------------------------
-    if len(sys.argv) >= 3:
+    if len(sys.argv) >= 3: # CLI mode
         json_in = Path(sys.argv[1]).resolve()
         gml_out = Path(sys.argv[2]).resolve()
 
@@ -125,9 +118,6 @@ def main():
         rc = convert_to_citygml2(json_in, gml_out, tools_bat)
         sys.exit(rc)
 
-    # ------------------------------------------------------------
-    # Interactive mode (standalone)
-    # ------------------------------------------------------------
     if not DEFAULT_JSON_DIR.exists():
         print(f"[ERROR] Folder not found: {DEFAULT_JSON_DIR}")
         sys.exit(1)
@@ -143,12 +133,11 @@ def main():
     picked = Path(picked)
 
     DEFAULT_GML_DIR.mkdir(parents=True, exist_ok=True)
-    output_gml = DEFAULT_GML_DIR / f"{picked.stem}.gml"
+    out_dir = _prefix_dir_for_json(DEFAULT_GML_DIR, picked)
+    output_gml = out_dir / f"{_gml_stem_from_json(picked)}.gml"
 
     rc = convert_to_citygml2(picked, output_gml, tools_bat)
     sys.exit(rc)
 
 if __name__ == "__main__":
     main()
-
-

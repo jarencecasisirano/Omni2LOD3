@@ -1,4 +1,3 @@
-# main.py
 import subprocess
 import sys
 
@@ -6,6 +5,7 @@ from pipeline.cityjson_steps import step_json_to_gml, step_validate_then_fix
 from pipeline.point_cloud_steps import pick_visualize_las, step_assign_building_class, step_downsample
 from utils.io_helpers import ensure_dirs
 from utils.paths import SCRIPT_INSPECT, SCRIPT_VISUALIZE
+from utils.schema_profile import ensure_profile_for_validation_interactive
 
 def main():
     ensure_dirs()
@@ -15,7 +15,7 @@ def main():
     print("\t[0] Inspect Point Cloud")
     print("\t[1] Voxel Downsample")
     print("\t[2] Reclassify Point Cloud")
-    print("\t[3] Validate via Val3dity")
+    print("\t[3] Validate via Val3dity + cjio schema")
     print("\t[4] Convert CityJSON to CityGML 2.0")
     print("\t[V] Visualize point cloud")
     print("\t[Q] Quit")
@@ -40,6 +40,7 @@ def main():
         step_assign_building_class()
 
     elif choice == "3":
+        ensure_profile_for_validation_interactive()
         step_validate_then_fix()
 
     elif choice == "4":

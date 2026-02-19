@@ -1,10 +1,10 @@
-# 05_json_to_gml2.py
+# 06_json_to_gml2.py
 """
 Convert CityJSON -> CityGML 2.0 using citygml-tools (from-cityjson).
 
 Pipeline-friendly:
 - CLI mode (used by main.py):
-    python 05_json_to_gml2.py <input_json> <output_gml>
+    python 06_json_to_gml2.py <input_json> <output_gml>
 
 - Interactive mode (no args):
     - lists JSON in outputs/04_LOD2_json
@@ -32,6 +32,14 @@ DEFAULT_GML_DIR  = PROJECT_ROOT / "outputs" / "05_LOD2_gml"
 # Optional: allow user to override tool location via env var
 ENV_BAT = os.environ.get("CITYGML_TOOLS_BAT", "").strip()
 
+
+def _rel(pathlike):
+    p = Path(pathlike)
+    try:
+        return str(p.resolve().relative_to(PROJECT_ROOT.resolve()))
+    except Exception:
+        return str(p)
+
 def find_citygml_tools_bat() -> Path | None:
     """
     Find citygml-tools.bat.
@@ -58,7 +66,7 @@ def convert_to_citygml2(json_path: Path, output_gml: Path, tools_bat: Path) -> i
     output_gml.parent.mkdir(parents=True, exist_ok=True)
 
     print("\n=== CONVERTING CITYJSON TO CITYGML 2.0 ===")
-    print(f"Input:  {json_path}")
+    print(f"Input:  {_rel(json_path)}")
     print(f"Tool:   {tools_bat}")
 
     cmd = [
@@ -86,8 +94,8 @@ def convert_to_citygml2(json_path: Path, output_gml: Path, tools_bat: Path) -> i
             print("\n[ERROR] Tool reported success but output file was not created.")
             return 2
 
-        print("\t✓ SUCCESS! CityGML 2.0 saved:")
-        print(f"\t{output_gml}")
+        print("\tSUCCESS! CityGML 2.0 saved:")
+        print(f"\t{_rel(output_gml)}")
         return 0
 
     except FileNotFoundError:
@@ -142,3 +150,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

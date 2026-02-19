@@ -1,4 +1,4 @@
-# 04_json_fix.py
+# 05_json_fix.py
 """
 LOD2 CityJSON Geometry Fixer (PIPELINE-FRIENDLY)
 
@@ -16,7 +16,7 @@ Behavior:
 - Writes: <stem>_FIXED.json into OUTPUT dir
 
 CLI mode:
-  python 04_json_fix.py <input_json> <output_json> [--report <report_json>] [--tol 0.001]
+  python 05_json_fix.py <input_json> <output_json> [--report <report_json>] [--tol 0.001]
 """
 
 import json
@@ -286,7 +286,7 @@ def main():
             report_override, tol_override, target_code = _parse_cli_options(sys.argv[3:])
         except Exception as e:
             print(f"[ERROR] {e}")
-            print("Usage: python 04_json_fix.py <input_json> <output_json> [--report <report_json>] [--tol 0.001]")
+            print("Usage: python 05_json_fix.py <input_json> <output_json> [--report <report_json>] [--tol 0.001]")
             sys.exit(1)
         report_path = report_override if report_override else _default_report_path_for_input(in_path)
 

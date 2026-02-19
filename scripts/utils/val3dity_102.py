@@ -41,6 +41,92 @@ def _xy_dist(a, b):
     return math.sqrt(dx * dx + dy * dy)
 
 
+def _orientation(a, b, c):
+    v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    if math.isclose(v, 0.0, abs_tol=1e-12):
+        return 0
+    return 1 if v > 0 else -1
+
+
+def _on_segment(a, b, c):
+    return (
+        min(a[0], b[0]) - 1e-12 <= c[0] <= max(a[0], b[0]) + 1e-12
+        and min(a[1], b[1]) - 1e-12 <= c[1] <= max(a[1], b[1]) + 1e-12
+    )
+
+
+def _segments_intersect(p1, p2, q1, q2):
+    o1 = _orientation(p1, p2, q1)
+    o2 = _orientation(p1, p2, q2)
+    o3 = _orientation(q1, q2, p1)
+    o4 = _orientation(q1, q2, p2)
+    if o1 != o2 and o3 != o4:
+        return True
+    if o1 == 0 and _on_segment(p1, p2, q1):
+        return True
+    if o2 == 0 and _on_segment(p1, p2, q2):
+        return True
+    if o3 == 0 and _on_segment(q1, q2, p1):
+        return True
+    if o4 == 0 and _on_segment(q1, q2, p2):
+        return True
+    return False
+
+
+def _polygon_area_xy(points):
+    if len(points) < 3:
+        return 0.0
+    s = 0.0
+    for i in range(len(points)):
+        x1, y1 = points[i][0], points[i][1]
+        x2, y2 = points[(i + 1) % len(points)][0], points[(i + 1) % len(points)][1]
+        s += x1 * y2 - x2 * y1
+    return 0.5 * s
+
+
+def _ring_has_self_intersection(vertices, transform, ring):
+    n = len(ring)
+    if n < 4:
+        return False
+    pts = [_world_xyz(vertices, vidx, transform) for vidx in ring]
+    for i in range(n):
+        i2 = (i + 1) % n
+        for j in range(i + 1, n):
+            j2 = (j + 1) % n
+            if len({i, i2, j, j2}) < 4:
+                continue
+            if _segments_intersect(pts[i], pts[i2], pts[j], pts[j2]):
+                return True
+    return False
+
+
+def _ring_world_points(vertices, transform, ring):
+    pts = []
+    for vidx in ring:
+        if not isinstance(vidx, int):
+            return []
+        if vidx < 0 or vidx >= len(vertices):
+            return []
+        pts.append(_world_xyz(vertices, vidx, transform))
+    return pts
+
+
+def _ring_is_104_safe(vertices, transform, ring, tol):
+    # Mirror val3dity's snap-driven robustness: reject tiny/collapsed rings early.
+    pts = _ring_world_points(vertices, transform, ring)
+    if len(pts) < 3:
+        return False
+    distinct = len({_snap_xy_key(p, tol) for p in pts})
+    if distinct < 3:
+        return False
+    if _ring_has_self_intersection(vertices, transform, ring):
+        return False
+    area = abs(_polygon_area_xy(pts))
+    if area < float(tol) * float(tol):
+        return False
+    return True
+
+
 def _snap_xy_key(pt, tol):
     if tol <= 0:
         return (pt[0], pt[1])
@@ -93,7 +179,7 @@ def _clean_ring_consecutive_duplicates(vertices, transform, ring, tol):
     return cleaned, removed, valid
 
 
-def _clone_vertex_with_xy_nudge(vertices, transform, src_vidx, tol, axis="x"):
+def _clone_vertex_with_xy_nudge(vertices, transform, src_vidx, tol, axis="x", sign=1.0):
     src = vertices[src_vidx]
     x = float(src[0])
     y = float(src[1])
@@ -113,9 +199,9 @@ def _clone_vertex_with_xy_nudge(vertices, transform, src_vidx, tol, axis="x"):
             delta_local_y = delta_world / sy
 
     if axis == "x":
-        new_v = [x + delta_local_x, y, z]
+        new_v = [x + float(sign) * delta_local_x, y, z]
     else:
-        new_v = [x, y + delta_local_y, z]
+        new_v = [x, y + float(sign) * delta_local_y, z]
 
     vertices.append(new_v)
     return len(vertices) - 1
@@ -128,11 +214,25 @@ def _repair_ring_preserve_face(vertices, transform, ring, tol):
     2) If ring would collapse, keep face and nudge cloned vertices on duplicate pairs.
     """
     cleaned, removed, valid = _clean_ring_consecutive_duplicates(vertices, transform, ring, tol)
-    if valid:
+    if valid and _ring_is_104_safe(vertices, transform, cleaned, tol):
         return cleaned, removed, 0, False, True
 
     if not isinstance(ring, list) or len(ring) < 3:
         return ring, removed, 0, False, False
+
+    # Special case for A,A,B,B-like rings: build a stable triangle from the 2-point backbone.
+    if len(cleaned) == 2 and all(isinstance(v, int) for v in cleaned):
+        base_a, base_b = cleaned[0], cleaned[1]
+        pa = _world_xyz(vertices, base_a, transform)
+        pb = _world_xyz(vertices, base_b, transform)
+        dx = pb[0] - pa[0]
+        dy = pb[1] - pa[1]
+        axis = "y" if abs(dx) >= abs(dy) else "x"
+        for sign in (1.0, -1.0):
+            tri_vidx = _clone_vertex_with_xy_nudge(vertices, transform, base_b, tol * 2.0, axis=axis, sign=sign)
+            tri = [base_a, base_b, tri_vidx]
+            if _ring_is_104_safe(vertices, transform, tri, tol):
+                return tri, removed, 1, True, True
 
     candidate = list(ring)
     new_vertices_added = 0
@@ -150,13 +250,13 @@ def _repair_ring_preserve_face(vertices, transform, ring, tol):
             and 0 <= b_idx < len(vertices)
             and _are_consecutive_duplicates(vertices, transform, a_idx, b_idx, tol)
         ):
-            new_vidx = _clone_vertex_with_xy_nudge(vertices, transform, b_idx, tol, axis=nudge_axis)
+            new_vidx = _clone_vertex_with_xy_nudge(vertices, transform, b_idx, tol, axis=nudge_axis, sign=1.0)
             candidate[i] = new_vidx
             new_vertices_added += 1
             nudge_axis = "y" if nudge_axis == "x" else "x"
 
     candidate_cleaned, removed2, valid2 = _clean_ring_consecutive_duplicates(vertices, transform, candidate, tol)
-    if valid2:
+    if valid2 and _ring_is_104_safe(vertices, transform, candidate_cleaned, tol):
         return candidate_cleaned, removed + removed2, new_vertices_added, True, True
 
     # Safety fallback: leave ring unchanged if we still cannot make it valid.

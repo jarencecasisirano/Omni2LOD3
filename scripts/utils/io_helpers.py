@@ -4,9 +4,6 @@ import os
 
 from utils.paths import OUTPUT_DIRS
 
-# ======================= UTILITIES =========================
-
-
 def ensure_dirs():
     for directory in OUTPUT_DIRS:
         os.makedirs(directory, exist_ok=True)

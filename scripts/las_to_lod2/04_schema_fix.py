@@ -10,10 +10,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.paths import PROJECT_ROOT
 from utils.schema.profile import resolve_schema_defaults
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
+PROJECT_ROOT = Path(PROJECT_ROOT)
 
 def _rel(pathlike):
     p = Path(pathlike)

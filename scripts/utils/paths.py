@@ -16,6 +16,10 @@ OUT_RECLASSIFIED = os.path.join(PROJECT_ROOT, "outputs", "02_reclassified")
 OUT_VAL3DITY = os.path.join(PROJECT_ROOT, "outputs", "03_val3dity")
 OUT_LOD2_JSON = os.path.join(PROJECT_ROOT, "outputs", "04_LOD2_json")
 OUT_LOD2_GML = os.path.join(PROJECT_ROOT, "outputs", "05_LOD2_gml")
+TOOLS_DIR = os.path.join(PROJECT_ROOT, "tools")
+VAL3DITY_EXE = os.path.join(TOOLS_DIR, "val3dity", "val3dity-win64", "val3dity.exe")
+SCHEMA_PROFILE_PATH = os.path.join(SCRIPTS_ROOT, "utils", "schema", "schema_identity.json")
+LEGACY_SCHEMA_PROFILE_PATH = os.path.join(OUT_INFO, "schema_identity.json")
 
 OUTPUT_DIRS = (
     OUT_INFO,

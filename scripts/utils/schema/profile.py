@@ -3,9 +3,15 @@ import os
 from datetime import date
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-SCHEMA_PROFILE_PATH = PROJECT_ROOT / "scripts" / "utils" / "schema" / "schema_identity.json"
-LEGACY_SCHEMA_PROFILE_PATH = PROJECT_ROOT / "outputs" / "00_las_info" / "schema_identity.json"
+from ..paths import (
+    LEGACY_SCHEMA_PROFILE_PATH as LEGACY_SCHEMA_PROFILE_PATH_STR,
+    PROJECT_ROOT as PROJECT_ROOT_STR,
+    SCHEMA_PROFILE_PATH as SCHEMA_PROFILE_PATH_STR,
+)
+
+PROJECT_ROOT = Path(PROJECT_ROOT_STR)
+SCHEMA_PROFILE_PATH = Path(SCHEMA_PROFILE_PATH_STR)
+LEGACY_SCHEMA_PROFILE_PATH = Path(LEGACY_SCHEMA_PROFILE_PATH_STR)
 
 
 def is_iso_date(text):

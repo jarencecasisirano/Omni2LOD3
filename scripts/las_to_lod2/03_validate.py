@@ -11,13 +11,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.io_helpers import choose_index, list_json_files
 from utils.las_helpers import extract_prefix
+from utils.paths import DATA_JSON_DIR, OUT_VAL3DITY, VAL3DITY_EXE as VAL3DITY_EXE_PATH
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-
-DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "03_json_model"
-REPORT_DIR = PROJECT_ROOT / "outputs" / "03_val3dity"
-VAL3DITY_EXE = PROJECT_ROOT / "tools" / "val3dity" / "val3dity-win64" / "val3dity.exe"
+DEFAULT_INPUT_DIR = Path(DATA_JSON_DIR)
+REPORT_DIR = Path(OUT_VAL3DITY)
+VAL3DITY_EXE = Path(VAL3DITY_EXE_PATH)
 
 EXIT_VALID = 0
 EXIT_INVALID = 2

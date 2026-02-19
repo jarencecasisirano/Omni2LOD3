@@ -10,15 +10,13 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.cityjson_helpers import gml_stem_from_json, prefix_dir
 from utils.io_helpers import choose_file, list_json_files
-from utils.las_helpers import extract_prefix
+from utils.paths import OUT_LOD2_GML, OUT_LOD2_JSON, PROJECT_ROOT, TOOLS_DIR
 
-
-SCRIPT_DIR = Path(__file__).resolve().parent                  
-PROJECT_ROOT = SCRIPT_DIR.parent.parent                       
-
-DEFAULT_JSON_DIR = PROJECT_ROOT / "outputs" / "04_LOD2_json"
-DEFAULT_GML_DIR  = PROJECT_ROOT / "outputs" / "05_LOD2_gml"
+PROJECT_ROOT = Path(PROJECT_ROOT)
+DEFAULT_JSON_DIR = Path(OUT_LOD2_JSON)
+DEFAULT_GML_DIR = Path(OUT_LOD2_GML)
 
 ENV_BAT = os.environ.get("CITYGML_TOOLS_BAT", "").strip()
 
@@ -30,26 +28,13 @@ def _rel(pathlike):
         return str(p)
 
 
-def _gml_stem_from_json(pathlike):
-    base = Path(pathlike).stem
-    if base.endswith("_SCHEMA_FIXED"):
-        return base[:-13]
-    return base
-
-
-def _prefix_dir_for_json(base_dir, json_path):
-    prefix = extract_prefix(str(json_path)).upper()
-    out_dir = Path(base_dir) / prefix
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir
-
 def find_citygml_tools_bat() -> Path | None:
     if ENV_BAT:
         p = Path(ENV_BAT)
         if p.exists():
             return p
 
-    tools_dir = PROJECT_ROOT / "tools"
+    tools_dir = Path(TOOLS_DIR)
     if tools_dir.exists():
         hits = list(tools_dir.rglob("citygml-tools.bat"))
         if hits:
@@ -133,8 +118,8 @@ def main():
     picked = Path(picked)
 
     DEFAULT_GML_DIR.mkdir(parents=True, exist_ok=True)
-    out_dir = _prefix_dir_for_json(DEFAULT_GML_DIR, picked)
-    output_gml = out_dir / f"{_gml_stem_from_json(picked)}.gml"
+    out_dir = prefix_dir(DEFAULT_GML_DIR, picked)
+    output_gml = out_dir / f"{gml_stem_from_json(picked)}.gml"
 
     rc = convert_to_citygml2(picked, output_gml, tools_bat)
     sys.exit(rc)

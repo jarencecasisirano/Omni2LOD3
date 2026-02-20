@@ -15,6 +15,7 @@ dependencies:
   - shapely  # Used in segment_planes for geometry operations
   - matplotlib  # Used in classify_points, segment_planes for plotting
   - scipy  # Used in classify_points for cKDTree
+  - trimesh
   - pytorch::pytorch=2.2.2  # Required for Open3D-ML
   - pytorch::torchvision
   - pytorch::pytorch-cuda=12.1  # CUDA support for PyTorch (use cpuonly if no GPU)

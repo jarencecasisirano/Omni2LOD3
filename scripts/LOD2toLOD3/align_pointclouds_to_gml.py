@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Align point clouds to CityGML LOD2 building model WallSurfaces.
+Align point clouds to CityGML LOD2 building model WallSurfaces — PER-FILE ICP TWEAK.
 
-This script:
-1. Parses a CityGML file and extracts WallSurface geometries
-2. Provides an interactive tool to map point clouds to wall surfaces
-3. Performs ICP registration to align point clouds to walls
-4. Applies scaling adjustments based on bounding box comparison
-5. Saves aligned point clouds to output directory
+Workflow:
+  1. Select a subfolder under outputs/06_aligned_p2p
+     (each subfolder contains .las files that form one building's facades,
+      already properly scaled and more or less aligned to the GML)
+  2. Select a .gml file from outputs/00_gml_wall_merged
+  3. Convert every WallSurface in the GML to a dense point cloud and merge
+     them all into one combined target cloud
+  4. ICP-align each .las file independently against that target
+  5. Save refined results to outputs/08_icp_refined/<subfolder_name>/
 """
 
 import os
-import argparse
 import json
+import argparse
 import numpy as np
 import laspy
 import open3d as o3d
@@ -21,961 +24,525 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 
+# ---------------------------------------------------------------------------
 # XML Namespaces for CityGML parsing
+# ---------------------------------------------------------------------------
 NAMESPACES = {
-    'gml': 'http://www.opengis.net/gml',
+    'gml':  'http://www.opengis.net/gml',
     'bldg': 'http://www.opengis.net/citygml/building/2.0',
-    'core': 'http://www.opengis.net/citygml/2.0'
+    'core': 'http://www.opengis.net/citygml/2.0',
 }
 
+# ---------------------------------------------------------------------------
 # Default directories
-DEFAULT_GML_DIR = 'outputs/00_gml_wall_merged'  # Use merged GML files
-DEFAULT_POINTCLOUD_BASE_DIR = 'outputs/04_manual_cleaned_point_clouds'
+# ---------------------------------------------------------------------------
+DEFAULT_PC_DIR     = 'outputs/06_aligned_p2p'     # subfolders with .las files
+DEFAULT_GML_DIR    = 'outputs/00_gml_wall_merged'  # .gml files
+DEFAULT_OUTPUT_DIR = 'outputs/08_icp_refined'      # refined .las output
+
+# ---------------------------------------------------------------------------
+# ICP parameters (fine tweak — clouds are already close)
+# ---------------------------------------------------------------------------
+ICP_THRESHOLD    = 0.5    # metres — max correspondence distance
+ICP_MAX_ITER     = 200    # iterations
+ICP_NORMAL_RADIUS = 0.5   # metres — normal estimation radius
+
+
+# ===========================================================================
+# Interactive selection helpers
+# ===========================================================================
+
+def select_subfolder(base_dir: str = DEFAULT_PC_DIR) -> Optional[str]:
+    """
+    List immediate subdirectories of *base_dir* and let the user choose one.
+    Returns the full path to the chosen subfolder, or None on cancellation.
+    """
+    if not os.path.isdir(base_dir):
+        print(f"ERROR: Directory not found: {base_dir}")
+        return None
+
+    subfolders = sorted([
+        d for d in os.listdir(base_dir)
+        if os.path.isdir(os.path.join(base_dir, d))
+    ])
+
+    if not subfolders:
+        print(f"ERROR: No subfolders found in {base_dir}")
+        return None
+
+    if len(subfolders) == 1:
+        chosen = os.path.join(base_dir, subfolders[0])
+        print(f"\n✓ Auto-selected (only one subfolder): {subfolders[0]}")
+        return chosen
+
+    print("\n" + "=" * 80)
+    print("SELECT POINT CLOUD SUBFOLDER")
+    print("=" * 80)
+    print(f"\nAvailable subfolders in {base_dir}:")
+    for i, name in enumerate(subfolders):
+        path = os.path.join(base_dir, name)
+        las_count = len([f for f in os.listdir(path) if f.lower().endswith('.las')])
+        print(f"  [{i}] {name}  ({las_count} .las files)")
+
+    while True:
+        try:
+            r = input(f"\nSelect subfolder (0-{len(subfolders)-1}, or 'q' to quit): ").strip()
+            if r.lower() == 'q':
+                return None
+            idx = int(r)
+            if 0 <= idx < len(subfolders):
+                chosen = os.path.join(base_dir, subfolders[idx])
+                print(f"✓ Selected: {subfolders[idx]}")
+                return chosen
+            print(f"  Invalid index. Enter 0-{len(subfolders)-1}.")
+        except ValueError:
+            print("  Invalid input.")
 
 
 def select_gml_file(gml_dir: str = DEFAULT_GML_DIR) -> Optional[str]:
     """
-    Interactive selection of GML file from directory.
-    
-    Args:
-        gml_dir: Directory containing GML files
-        
-    Returns:
-        Path to selected GML file, or None if cancelled
+    List .gml files in *gml_dir* and let the user pick one.
+    Returns the full path, or None on cancellation.
     """
-    if not os.path.exists(gml_dir):
+    if not os.path.isdir(gml_dir):
         print(f"ERROR: GML directory not found: {gml_dir}")
         return None
-    
-    gml_files = sorted([f for f in os.listdir(gml_dir) if f.endswith('.gml')])
-    
+
+    gml_files = sorted([f for f in os.listdir(gml_dir) if f.lower().endswith('.gml')])
+
     if not gml_files:
         print(f"ERROR: No .gml files found in {gml_dir}")
         return None
-    
-    # Auto-select if only one file
+
     if len(gml_files) == 1:
-        selected = os.path.join(gml_dir, gml_files[0])
+        chosen = os.path.join(gml_dir, gml_files[0])
         print(f"\n✓ Auto-selected (only one GML file): {gml_files[0]}")
-        return selected
-    
+        return chosen
+
     print("\n" + "=" * 80)
     print("SELECT GML MODEL")
     print("=" * 80)
     print(f"\nAvailable GML files in {gml_dir}:")
-    
-    for i, filename in enumerate(gml_files):
-        filepath = os.path.join(gml_dir, filename)
-        size_mb = os.path.getsize(filepath) / (1024 * 1024)
-        print(f"  [{i}] {filename} ({size_mb:.2f} MB)")
-    
+    for i, name in enumerate(gml_files):
+        size_mb = os.path.getsize(os.path.join(gml_dir, name)) / (1024 * 1024)
+        print(f"  [{i}] {name}  ({size_mb:.2f} MB)")
+
     while True:
         try:
-            response = input(f"\nSelect GML file (0-{len(gml_files)-1}, or 'q' to quit): ")
-            
-            if response.lower() == 'q':
+            r = input(f"\nSelect GML file (0-{len(gml_files)-1}, or 'q' to quit): ").strip()
+            if r.lower() == 'q':
                 return None
-            
-            idx = int(response)
+            idx = int(r)
             if 0 <= idx < len(gml_files):
-                selected = os.path.join(gml_dir, gml_files[idx])
+                chosen = os.path.join(gml_dir, gml_files[idx])
                 print(f"✓ Selected: {gml_files[idx]}")
-                return selected
-            else:
-                print(f"Invalid index. Please enter 0-{len(gml_files)-1}")
+                return chosen
+            print(f"  Invalid index. Enter 0-{len(gml_files)-1}.")
         except ValueError:
-            print("Invalid input. Please enter a number or 'q' to quit.")
+            print("  Invalid input.")
 
 
-def select_pointcloud_directory(base_dir: str = DEFAULT_POINTCLOUD_BASE_DIR) -> Optional[str]:
-    """
-    Interactive selection of point cloud subdirectory.
-    
-    Args:
-        base_dir: Base directory containing point cloud subdirectories
-        
-    Returns:
-        Path to selected subdirectory, or None if cancelled
-    """
-    if not os.path.exists(base_dir):
-        print(f"ERROR: Point cloud base directory not found: {base_dir}")
-        return None
-    
-    # Get all subdirectories
-    subdirs = sorted([d for d in os.listdir(base_dir) 
-                     if os.path.isdir(os.path.join(base_dir, d))])
-    
-    if not subdirs:
-        print(f"ERROR: No subdirectories found in {base_dir}")
-        return None
-    
-    # Auto-select if only one directory
-    if len(subdirs) == 1:
-        selected = os.path.join(base_dir, subdirs[0])
-        las_count = len(list(Path(selected).glob('*.las')))
-        print(f"\n✓ Auto-selected (only one directory): {subdirs[0]} ({las_count} .las files)")
-        return selected
-    
-    print("\n" + "=" * 80)
-    print("SELECT POINT CLOUD DIRECTORY")
-    print("=" * 80)
-    print(f"\nAvailable point cloud directories in {base_dir}:")
-    
-    for i, dirname in enumerate(subdirs):
-        dirpath = os.path.join(base_dir, dirname)
-        las_files = list(Path(dirpath).glob('*.las'))
-        print(f"  [{i}] {dirname} ({len(las_files)} .las files)")
-    
-    while True:
-        try:
-            response = input(f"\nSelect directory (0-{len(subdirs)-1}, or 'q' to quit): ")
-            
-            if response.lower() == 'q':
-                return None
-            
-            idx = int(response)
-            if 0 <= idx < len(subdirs):
-                selected = os.path.join(base_dir, subdirs[idx])
-                las_count = len(list(Path(selected).glob('*.las')))
-                print(f"✓ Selected: {subdirs[idx]} ({las_count} .las files)")
-                return selected
-            else:
-                print(f"Invalid index. Please enter 0-{len(subdirs)-1}")
-        except ValueError:
-            print("Invalid input. Please enter a number or 'q' to quit.")
-
+# ===========================================================================
+# CityGML wall surface representation
+# ===========================================================================
 
 class WallSurface:
-    """Represents a WallSurface from CityGML with its geometry."""
-    
+    """One polygon face from a CityGML WallSurface element."""
+
     def __init__(self, surface_id: str, coordinates: np.ndarray):
-        self.id = surface_id
-        self.coordinates = coordinates  # Nx3 array of vertices
-        self.bbox_min = np.min(coordinates, axis=0)
-        self.bbox_max = np.max(coordinates, axis=0)
-        self._normal = None
-        
-    def to_pointcloud(self, density: float = 0.1) -> o3d.geometry.PointCloud:
-        """Convert wall surface to point cloud by sampling the polygon surface."""
+        self.id          = surface_id
+        self.coordinates = coordinates          # Nx3
+        self.bbox_min    = np.min(coordinates, axis=0)
+        self.bbox_max    = np.max(coordinates, axis=0)
+        self._normal     = None
+
+    # ------------------------------------------------------------------
+    def to_pointcloud(self, density: float = 0.05) -> o3d.geometry.PointCloud:
+        """Densely sample the polygon and return an Open3D PointCloud."""
         if len(self.coordinates) < 3:
             return o3d.geometry.PointCloud()
-        
-        # Create triangulated mesh from polygon
-        vertices = self.coordinates
-        n_vertices = len(vertices)
-        
-        # Simple fan triangulation from first vertex
-        triangles = []
-        for i in range(1, n_vertices - 1):
-            triangles.append([0, i, i + 1])
-        
+
+        n   = len(self.coordinates)
+        tri = [[0, i, i + 1] for i in range(1, n - 1)]
+
         mesh = o3d.geometry.TriangleMesh()
-        mesh.vertices = o3d.utility.Vector3dVector(vertices)
-        mesh.triangles = o3d.utility.Vector3iVector(np.array(triangles))
-        
-        # Sample points from mesh surface
-        num_points = max(100, int(mesh.get_surface_area() / (density ** 2)))
-        pcd = mesh.sample_points_uniformly(number_of_points=num_points)
-        
-        return pcd
-    
+        mesh.vertices  = o3d.utility.Vector3dVector(self.coordinates)
+        mesh.triangles = o3d.utility.Vector3iVector(np.array(tri, dtype=np.int32))
+
+        area       = mesh.get_surface_area()
+        n_pts      = max(100, int(area / (density ** 2)))
+        return mesh.sample_points_uniformly(number_of_points=n_pts)
+
     def get_center(self) -> np.ndarray:
-        """Get the center point of the wall surface."""
         return np.mean(self.coordinates, axis=0)
-    
+
     def get_dimensions(self) -> Tuple[float, float, float]:
-        """Get the dimensions (width, height, depth) of the wall surface."""
-        dims = self.bbox_max - self.bbox_min
-        return tuple(dims)
-    
+        return tuple(self.bbox_max - self.bbox_min)
+
     def get_normal(self) -> np.ndarray:
-        """Calculate and return the surface normal vector."""
         if self._normal is not None:
             return self._normal
-        
         if len(self.coordinates) < 3:
-            return np.array([0, 0, 1])
-        
-        # Use first three vertices to compute normal via cross product
+            return np.array([0.0, 0.0, 1.0])
         v1 = self.coordinates[1] - self.coordinates[0]
         v2 = self.coordinates[2] - self.coordinates[0]
-        normal = np.cross(v1, v2)
-        
-        # Normalize
-        norm = np.linalg.norm(normal)
-        if norm > 1e-6:
-            normal = normal / norm
-        else:
-            normal = np.array([0, 0, 1])
-        
-        self._normal = normal
-        return normal
-    
-    def is_adjacent(self, other: 'WallSurface', distance_threshold: float = 1.0) -> bool:
-        """Check if another wall surface is spatially adjacent."""
-        # Check if bounding boxes are close
-        center1 = self.get_center()
-        center2 = other.get_center()
-        distance = np.linalg.norm(center1 - center2)
-        
-        # Consider adjacent if centers are within distance threshold
-        # or if bounding boxes overlap/touch
-        if distance > distance_threshold * 10:  # Quick rejection
-            return False
-        
-        # Check for any shared vertices
-        for v1 in self.coordinates:
-            for v2 in other.coordinates:
-                if np.linalg.norm(v1 - v2) < 0.01:  # Same vertex
-                    return True
-        
-        return False
-    
-    def is_coplanar(self, other: 'WallSurface', plane_distance_threshold: float = 0.5) -> bool:
-        """
-        Check if another wall surface is coplanar (on the same plane).
-        This allows merging surfaces at different heights on the same facade.
-        
-        Args:
-            other: Another WallSurface to compare
-            plane_distance_threshold: Maximum distance from plane to be considered coplanar
-            
-        Returns:
-            True if surfaces are on the same plane
-        """
-        # Get normals
-        normal1 = self.get_normal()
-        normal2 = other.get_normal()
-        
-        # Normals should already be similar (checked by caller)
-        # Now check if they're on the same plane
-        
-        # Define plane using this surface: normal · (point - point_on_plane) = 0
-        point_on_plane1 = self.coordinates[0]
-        
-        # Check distances of all points in other surface to this plane
-        distances = []
-        for point in other.coordinates:
-            # Distance from point to plane
-            d = abs(np.dot(normal1, point - point_on_plane1))
-            distances.append(d)
-        
-        max_distance = max(distances)
-        
-        # If all points are close to the plane, surfaces are coplanar
-        return max_distance < plane_distance_threshold
+        n  = np.cross(v1, v2)
+        nm = np.linalg.norm(n)
+        self._normal = n / nm if nm > 1e-6 else np.array([0.0, 0.0, 1.0])
+        return self._normal
 
+
+# ===========================================================================
+# GML parsing & target-cloud construction
+# ===========================================================================
 
 def parse_gml_wallsurfaces(gml_file: str) -> List[WallSurface]:
-    """
-    Parse CityGML file and extract all WallSurface geometries.
-    
-    Args:
-        gml_file: Path to CityGML file
-        
-    Returns:
-        List of WallSurface objects
-    """
-    print(f"Parsing GML file: {gml_file}")
-    tree = etree.parse(gml_file)
-    root = tree.getroot()
-    
-    wall_surfaces = []
-    
-    # Find all WallSurface elements
-    wall_elements = root.xpath('//bldg:WallSurface', namespaces=NAMESPACES)
-    print(f"Found {len(wall_elements)} WallSurface elements")
-    
-    for wall_elem in wall_elements:
-        # Find the polygon within this wall surface
-        polygons = wall_elem.xpath('.//gml:Polygon', namespaces=NAMESPACES)
-        
-        for polygon in polygons:
-            # Get the polygon ID
-            polygon_id = polygon.get('{http://www.opengis.net/gml}id', 'unknown')
-            
-            # Extract coordinates from posList
-            pos_lists = polygon.xpath('.//gml:posList', namespaces=NAMESPACES)
-            
-            for pos_list in pos_lists:
-                text = pos_list.text.strip()
+    """Parse CityGML and extract all WallSurface polygons."""
+    print(f"\nParsing GML: {gml_file}")
+    root = etree.parse(gml_file).getroot()
+
+    walls = []
+    for wall_elem in root.xpath('//bldg:WallSurface', namespaces=NAMESPACES):
+        for polygon in wall_elem.xpath('.//gml:Polygon', namespaces=NAMESPACES):
+            poly_id   = polygon.get('{http://www.opengis.net/gml}id', 'unknown')
+            for pos_list in polygon.xpath('.//gml:posList', namespaces=NAMESPACES):
+                text = (pos_list.text or '').strip()
                 if not text:
                     continue
-                
-                # Parse space-separated coordinates
-                coords = list(map(float, text.split()))
-                
-                # Group into (x, y, z) triplets
-                coords_array = np.array(coords).reshape(-1, 3)
-                
-                wall_surface = WallSurface(polygon_id, coords_array)
-                wall_surfaces.append(wall_surface)
-                print(f"  Loaded WallSurface {polygon_id}: {len(coords_array)} vertices, "
-                      f"dims={wall_surface.get_dimensions()}")
-    
-    return wall_surfaces
+                coords = np.array(list(map(float, text.split()))).reshape(-1, 3)
+                walls.append(WallSurface(poly_id, coords))
+
+    print(f"  Found {len(walls)} WallSurface polygon(s)")
+    return walls
 
 
-def merge_wall_surfaces(wall_surfaces: List[WallSurface], 
-                        normal_angle_threshold: float = 5.0,
-                        distance_threshold: float = 2.0) -> List[WallSurface]:
+def gml_walls_to_pointcloud(
+        walls: List[WallSurface],
+        density: float = 0.05,
+) -> o3d.geometry.PointCloud:
     """
-    Merge adjacent wall surfaces with similar normals.
-    
-    Args:
-        wall_surfaces: List of WallSurface objects
-        normal_angle_threshold: Maximum angle difference in degrees for normals to be considered similar
-        distance_threshold: Maximum distance for surfaces to be considered adjacent
-        
-    Returns:
-        List of merged WallSurface objects
+    Sample every WallSurface polygon into points and concatenate them all
+    into one combined target point cloud.
     """
-    print(f"\nMerging wall surfaces...")
-    print(f"  Initial count: {len(wall_surfaces)}")
-    print(f"  Normal angle threshold: {normal_angle_threshold}°")
-    print(f"  Distance threshold: {distance_threshold}m")
-    
-    if len(wall_surfaces) == 0:
-        return []
-    
-    # Convert angle threshold to radians for dot product comparison
-    angle_threshold_rad = np.radians(normal_angle_threshold)
-    cos_threshold = np.cos(angle_threshold_rad)
-    
-    # Track which surfaces have been merged
-    merged_flags = [False] * len(wall_surfaces)
-    merged_surfaces = []
-    
-    for i, wall in enumerate(wall_surfaces):
-        if merged_flags[i]:
-            continue
-        
-        # Start a new group with this surface
-        group = [i]
-        group_normal = wall.get_normal()
-        merged_flags[i] = True
-        
-        # Find all adjacent surfaces with similar normals
-        changed = True
-        while changed:
-            changed = False
-            for j in range(len(wall_surfaces)):
-                if merged_flags[j]:
-                    continue
-                
-                other_wall = wall_surfaces[j]
-                other_normal = other_wall.get_normal()
-                
-                # Check normal similarity
-                dot_product = np.dot(group_normal, other_normal)
-                normals_similar = abs(dot_product) >= cos_threshold
-                
-                if not normals_similar:
-                    continue
-                
-                # Check if adjacent (shared vertices) OR coplanar (same facade)
-                is_adjacent_to_group = False
-                for group_idx in group:
-                    group_surface = wall_surfaces[group_idx]
-                    # Check traditional adjacency (shared vertices)
-                    if group_surface.is_adjacent(other_wall, distance_threshold):
-                        is_adjacent_to_group = True
-                        break
-                    # Also check if coplanar (allows merging at different heights)
-                    if group_surface.is_coplanar(other_wall, plane_distance_threshold=0.5):
-                        is_adjacent_to_group = True
-                        break
-                
-                if is_adjacent_to_group:
-                    group.append(j)
-                    merged_flags[j] = True
-                    changed = True
-        
-        # Create merged surface from group
-        if len(group) == 1:
-            # No merging needed
-            merged_surfaces.append(wall_surfaces[group[0]])
-        else:
-            # Merge multiple surfaces
-            all_vertices = []
-            merged_ids = []
-            
-            for idx in group:
-                all_vertices.append(wall_surfaces[idx].coordinates)
-                merged_ids.append(wall_surfaces[idx].id)
-            
-            # Combine all vertices
-            combined_vertices = np.vstack(all_vertices)
-            
-            # Compute convex hull to get outer boundary
-            from scipy.spatial import ConvexHull
-            try:
-                # Project to 2D for convex hull (use first 2 principal components)
-                centroid = np.mean(combined_vertices, axis=0)
-                centered = combined_vertices - centroid
-                
-                # Use PCA to find best 2D projection plane
-                cov = np.cov(centered.T)
-                eigenvalues, eigenvectors = np.linalg.eig(cov)
-                # Sort by eigenvalue
-                idx = eigenvalues.argsort()[::-1]
-                eigenvectors = eigenvectors[:, idx]
-                
-                # Project to 2D using first two eigenvectors
-                projected_2d = centered @ eigenvectors[:, :2]
-                
-                # Compute 2D convex hull
-                hull_2d = ConvexHull(projected_2d)
-                hull_indices = hull_2d.vertices
-                
-                # Get 3D coordinates of hull vertices
-                hull_vertices_3d = combined_vertices[hull_indices]
-                
-                # Create merged surface
-                merged_id = f"MERGED_{'_'.join([mid.split('_')[-1][:8] for mid in merged_ids[:3]])}"
-                merged_surface = WallSurface(merged_id, hull_vertices_3d)
-                merged_surfaces.append(merged_surface)
-                
-                print(f"  Merged {len(group)} surfaces into {merged_id}")
-                
-            except Exception as e:
-                print(f"  Warning: Could not merge group of {len(group)} surfaces: {e}")
-                # Fall back to keeping original surfaces
-                for idx in group:
-                    merged_surfaces.append(wall_surfaces[idx])
-    
-    print(f"  Final count: {len(merged_surfaces)} ({len(wall_surfaces) - len(merged_surfaces)} surfaces merged)")
-    return merged_surfaces
+    print(f"\nSampling GML walls into target point cloud (density={density} m) ...")
+    combined = o3d.geometry.PointCloud()
+    for i, w in enumerate(walls):
+        pcd = w.to_pointcloud(density=density)
+        combined += pcd
+        print(f"  Wall [{i:>3}] {w.id[:40]:<40}  → {len(pcd.points):>7,} pts  "
+              f"  (ctr {w.get_center().round(2)})")
+
+    pts_total = len(combined.points)
+    print(f"\n  Combined target: {pts_total:,} points from {len(walls)} wall(s)")
+
+    if pts_total == 0:
+        print("  WARNING: Target cloud is empty — check GML coordinate parsing.")
+    return combined
 
 
-def load_las_pointcloud(las_file: str) -> o3d.geometry.PointCloud:
-    """
-    Load a LAS point cloud file and convert to Open3D format.
-    
-    Args:
-        las_file: Path to LAS file
-        
-    Returns:
-        Open3D PointCloud object
-    """
-    print(f"Loading point cloud: {las_file}")
-    las = laspy.read(las_file)
-    
-    # Extract coordinates
-    points = np.vstack((las.x, las.y, las.z)).transpose()
-    
-    # Create Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
+def visualize_target(
+        target_pcd: o3d.geometry.PointCloud,
+        walls: List[WallSurface],
+) -> None:
+    """Open an Open3D window showing the colour-coded GML target cloud."""
+    import colorsys
+    print("\n  Opening GML target viewer (close window to continue)...")
+    geoms = []
+    for i, w in enumerate(walls):
+        hue = (i * 0.618033988749895) % 1.0
+        rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
+        pcd = w.to_pointcloud(density=0.05)
+        pcd.paint_uniform_color(list(rgb))
+        geoms.append(pcd)
+
+        sph = o3d.geometry.TriangleMesh.create_sphere(radius=0.4)
+        sph.translate(w.get_center())
+        sph.paint_uniform_color([1.0, 0.0, 0.0])
+        geoms.append(sph)
+
+    o3d.visualization.draw_geometries(
+        geoms,
+        window_name=f"GML WallSurfaces — {len(walls)} walls (close to continue)",
+        width=1400, height=800,
+    )
+
+
+# ===========================================================================
+# Point cloud I/O
+# ===========================================================================
+
+def load_las_as_pcd(las_path: str) -> o3d.geometry.PointCloud:
+    """Load a LAS file and return an Open3D PointCloud."""
+    las    = laspy.read(las_path)
+    points = np.vstack((las.x, las.y, las.z)).T
+    pcd    = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
-    
-    # Load colors if available
     if hasattr(las, 'red'):
-        colors = np.vstack((las.red, las.green, las.blue)).transpose() / 65535.0
+        colors = np.vstack((las.red, las.green, las.blue)).T / 65535.0
         pcd.colors = o3d.utility.Vector3dVector(colors)
-    
-    print(f"  Loaded {len(points):,} points")
-    print(f"  Bounding box: min={np.min(points, axis=0)}, max={np.max(points, axis=0)}")
-    
     return pcd
 
 
-def build_wall_color_map(wall_surfaces: List[WallSurface]):
+def save_las_with_transform(
+        original_las_path: str,
+        transform_4x4: np.ndarray,
+        output_path: str,
+) -> None:
     """
-    Assign a visually distinct HSV colour to every wall surface.
+    Read the original LAS, apply *transform_4x4* to its XYZ coordinates,
+    and write the result to *output_path*, preserving all other attributes.
+    """
+    las    = laspy.read(original_las_path)
+    pts    = np.vstack((las.x, las.y, las.z)).T          # Nx3
+    # Homogeneous transform
+    ones   = np.ones((len(pts), 1))
+    pts_h  = np.hstack((pts, ones))                       # Nx4
+    pts_t  = (transform_4x4 @ pts_h.T).T[:, :3]          # Nx3
+
+    header          = laspy.LasHeader(point_format=las.header.point_format,
+                                      version=las.header.version)
+    header.offsets  = np.min(pts_t, axis=0)
+    header.scales   = np.array([0.001, 0.001, 0.001])
+
+    out_las   = laspy.LasData(header)
+    out_las.x = pts_t[:, 0]
+    out_las.y = pts_t[:, 1]
+    out_las.z = pts_t[:, 2]
+
+    # Preserve colour if present
+    for ch in ('red', 'green', 'blue'):
+        if hasattr(las, ch):
+            setattr(out_las, ch, getattr(las, ch))
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    out_las.write(output_path)
+    print(f"    ✓ Saved {len(pts_t):,} pts → {output_path}")
+
+
+# ===========================================================================
+# ICP alignment (source → pre-built target cloud)
+# ===========================================================================
+
+def icp_align(
+        source_pcd:    o3d.geometry.PointCloud,
+        target_pcd:    o3d.geometry.PointCloud,
+        threshold:     float = ICP_THRESHOLD,
+        max_iter:      int   = ICP_MAX_ITER,
+        normal_radius: float = ICP_NORMAL_RADIUS,
+        visualize:     bool  = False,
+        label:         str   = '',
+) -> Tuple[np.ndarray, float, float]:
+    """
+    Fine point-to-plane ICP.  Source is assumed already close to target.
 
     Returns:
-        List of (index, rgb_tuple_0_1, WallSurface) — same order as wall_surfaces.
+        (4x4 transform, fitness, inlier_rmse)
     """
-    import colorsys
-    color_map = []
-    for i, wall in enumerate(wall_surfaces):
-        hue = (i * 0.618033988749895) % 1.0  # Golden-ratio spacing
-        rgb = colorsys.hsv_to_rgb(hue, 0.75, 0.90)
-        color_map.append((i, rgb, wall))
-    return color_map
+    print(f"\n  ICP: {label}  threshold={threshold} m  max_iter={max_iter}")
 
+    kd = o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=30)
+    target_copy = o3d.geometry.PointCloud(target_pcd)
+    target_copy.estimate_normals(search_param=kd)
 
-def visualize_wall_surfaces(wall_surfaces: List[WallSurface],
-                            density: float = 0.05,
-                            show_viewer: bool = True) -> list:
-    """
-    Print a colour-coded terminal legend for all wall surfaces and
-    (optionally) open an Open3D viewer with matching colours.
+    source_copy = o3d.geometry.PointCloud(source_pcd)
+    source_copy.estimate_normals(search_param=kd)
 
-    Each wall gets a unique HSV colour. Red spheres mark surface centres.
+    reg = o3d.pipelines.registration.registration_icp(
+        source_copy,
+        target_copy,
+        threshold,
+        np.eye(4),
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iter),
+    )
 
-    Args:
-        wall_surfaces: List of WallSurface objects.
-        density:       Point sampling density for the viewer mesh.
-        show_viewer:   If True, open the Open3D window (blocks until closed).
+    print(f"    fitness={reg.fitness:.4f}  RMSE={reg.inlier_rmse:.4f} m")
 
-    Returns:
-        color_map  list of (index, rgb, WallSurface)
-    """
-    color_map = build_wall_color_map(wall_surfaces)
+    if visualize:
+        print("    Opening before/after viewer (close to continue)...")
+        before = o3d.geometry.PointCloud(source_pcd)
+        before.paint_uniform_color([1.0, 0.4, 0.0])   # orange
 
-    # ------------------------------------------------------------------
-    # Terminal legend
-    # ------------------------------------------------------------------
-    print(f"\n{'='*80}")
-    print("WALL SURFACE COLOR LEGEND")
-    print(f"{'='*80}")
-    print(f"  Total surfaces: {len(wall_surfaces)}")
-    print(f"  Colours match the 3D viewer. Red spheres mark each wall's centre.\n")
+        after = o3d.geometry.PointCloud(source_pcd)
+        after.transform(reg.transformation)
+        after.paint_uniform_color([0.0, 0.9, 0.3])    # green
 
-    for idx, rgb, wall in color_map:
-        r, g, b = int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
-        # ANSI 24-bit true-colour swatch
-        swatch = f"\033[48;2;{r};{g};{b}m   \033[0m"
-        center = wall.get_center()
-        dims   = wall.get_dimensions()
-        print(f"  {swatch} [{idx:>3d}] {wall.id[:40]:<40}  "
-              f"ctr=({center[0]:.1f},{center[1]:.1f},{center[2]:.1f})  "
-              f"W={dims[0]:.1f} H={dims[1]:.1f} D={dims[2]:.1f}")
+        tgt_vis = o3d.geometry.PointCloud(target_pcd)
+        tgt_vis.paint_uniform_color([0.2, 0.4, 1.0])  # blue
 
-    print(f"\n{'='*80}")
-    print("  🔴 Red spheres = wall centres   |   🌈 Surface colour = index colour")
-    print(f"{'='*80}\n")
-
-    # ------------------------------------------------------------------
-    # Open3D viewer
-    # ------------------------------------------------------------------
-    if show_viewer:
-        geometries = []
-        for idx, rgb, wall in color_map:
-            pcd = wall.to_pointcloud(density=density)
-            pcd.paint_uniform_color(list(rgb))
-            geometries.append(pcd)
-
-            center = wall.get_center()
-            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.4)
-            sphere.translate(center)
-            sphere.paint_uniform_color([1.0, 0.0, 0.0])
-            geometries.append(sphere)
-
-        print("  Opening 3D viewer — close the window to continue...")
         o3d.visualization.draw_geometries(
-            geometries,
-            window_name=f"GML WallSurfaces — {len(wall_surfaces)} walls (close to continue)",
+            [before, after, tgt_vis],
+            window_name=f"ICP {label} — orange=before  green=after  blue=GML",
             width=1400, height=800,
         )
 
-    return color_map
+    return reg.transformation, reg.fitness, reg.inlier_rmse
 
 
-def interactive_wall_selection(wall_surfaces: List[WallSurface],
-                               pointcloud_files: List[str]) -> Dict[str, int]:
-    """
-    Interactive tool for the user to map each point cloud to a wall surface.
-
-    Automatically shows the colour-coded 3D viewer + terminal legend first so
-    the user can inspect the building before entering index numbers.
-
-    Args:
-        wall_surfaces:    List of WallSurface objects.
-        pointcloud_files: List of point cloud file paths.
-
-    Returns:
-        Dictionary mapping point cloud filename → wall surface index.
-    """
-    print("\n" + "=" * 80)
-    print("INTERACTIVE WALL SURFACE SELECTION")
-    print("=" * 80)
-
-    # Show the colour-coded viewer + legend BEFORE asking for input
-    color_map = visualize_wall_surfaces(wall_surfaces, density=0.05, show_viewer=True)
-
-    # Build a compact one-line reference that will be reprinted for each file
-    def _legend_line(idx, rgb, wall):
-        r, g, b = int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
-        swatch = f"\033[48;2;{r};{g};{b}m   \033[0m"
-        center = wall.get_center()
-        return (f"  {swatch} [{idx:>3d}] {wall.id[:35]:<35}  "
-                f"ctr=({center[0]:.1f},{center[1]:.1f},{center[2]:.1f})")
-
-    compact_legend = [_legend_line(idx, rgb, w) for idx, rgb, w in color_map]
-
-    mapping = {}
-
-    for pc_file in pointcloud_files:
-        filename = os.path.basename(pc_file)
-
-        print(f"\n{'─'*80}")
-        print(f"  Point cloud: {filename}")
-        print(f"{'─'*80}")
-        # Reprint the compact colour legend so the user never has to scroll
-        print("  Wall legend (colours match 3D viewer):")
-        for line in compact_legend:
-            print(line)
-        print()
-
-        while True:
-            try:
-                response = input(
-                    f"  Select wall index for '{filename}'  "
-                    f"(0–{len(wall_surfaces)-1}  |  's' to skip  |  'v' to reopen viewer): "
-                ).strip()
-
-                if response.lower() == 's':
-                    print(f"  ⏭  Skipping {filename}")
-                    break
-
-                if response.lower() == 'v':
-                    visualize_wall_surfaces(wall_surfaces, density=0.05, show_viewer=True)
-                    continue
-
-                wall_idx = int(response)
-                if 0 <= wall_idx < len(wall_surfaces):
-                    _, rgb, _ = color_map[wall_idx]
-                    r, g, b = int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
-                    swatch = f"\033[48;2;{r};{g};{b}m   \033[0m"
-                    print(f"  ✓ {swatch} Mapped '{filename}' → [{wall_idx}] {wall_surfaces[wall_idx].id}")
-                    mapping[filename] = wall_idx
-                    break
-                else:
-                    print(f"  Invalid index. Enter 0–{len(wall_surfaces)-1}.")
-
-            except ValueError:
-                print("  Invalid input. Enter a number, 's' to skip, or 'v' to reopen viewer.")
-
-    print("\n" + "=" * 80)
-    print(f"  Mapping complete: {len(mapping)} point cloud(s) mapped")
-    print("=" * 80 + "\n")
-    return mapping
-
-
-
-def compute_scale_factor(source_pcd: o3d.geometry.PointCloud,
-                         target_pcd: o3d.geometry.PointCloud,
-                         mode: str = 'uniform') -> Tuple[np.ndarray, float]:
-    """
-    Compute scale factor to match source to target bounding boxes.
-    
-    Args:
-        source_pcd: Source point cloud to be scaled
-        target_pcd: Target point cloud (reference)
-        mode: 'uniform', 'non-uniform', or 'none'
-        
-    Returns:
-        Tuple of (scale_vector, uniform_scale_factor)
-    """
-    source_bbox = source_pcd.get_axis_aligned_bounding_box()
-    target_bbox = target_pcd.get_axis_aligned_bounding_box()
-    
-    source_extent = source_bbox.get_extent()
-    target_extent = target_bbox.get_extent()
-    
-    # Avoid division by zero
-    source_extent = np.maximum(source_extent, 1e-6)
-    
-    scale_per_axis = target_extent / source_extent
-    
-    if mode == 'uniform':
-        # Use median scale factor
-        uniform_scale = np.median(scale_per_axis)
-        return np.array([uniform_scale] * 3), uniform_scale
-    elif mode == 'non-uniform':
-        return scale_per_axis, np.mean(scale_per_axis)
-    else:  # 'none'
-        return np.array([1.0, 1.0, 1.0]), 1.0
-
-
-def align_pointcloud_to_wall(source_pcd: o3d.geometry.PointCloud,
-                             wall_surface: WallSurface,
-                             scale_mode: str = 'uniform',
-                             icp_threshold: float = 1.0,
-                             visualize: bool = False) -> Tuple[o3d.geometry.PointCloud, np.ndarray, float]:
-    """
-    Align a point cloud to a wall surface using ICP registration.
-    
-    Args:
-        source_pcd: Point cloud to align
-        wall_surface: Target wall surface
-        scale_mode: Scaling mode ('uniform', 'non-uniform', 'none')
-        icp_threshold: Distance threshold for ICP
-        visualize: Whether to visualize alignment
-        
-    Returns:
-        Tuple of (aligned_pointcloud, transformation_matrix, fitness_score)
-    """
-    print(f"\nAligning to WallSurface {wall_surface.id}")
-    
-    # Convert wall surface to point cloud
-    target_pcd = wall_surface.to_pointcloud(density=0.1)
-    print(f"  Wall surface sampled to {len(target_pcd.points):,} points")
-    
-    # Step 1: Compute and apply scaling
-    scale_vector, uniform_scale = compute_scale_factor(source_pcd, target_pcd, scale_mode)
-    print(f"  Scale factors: {scale_vector} (uniform={uniform_scale:.4f})")
-    
-    source_scaled = o3d.geometry.PointCloud(source_pcd)
-    source_scaled.scale(uniform_scale if scale_mode == 'uniform' else 1.0, 
-                       center=source_scaled.get_center())
-    
-    # Step 2: Initial alignment via bounding box centers
-    source_center = source_scaled.get_center()
-    target_center = target_pcd.get_center()
-    translation = target_center - source_center
-    
-    init_transform = np.eye(4)
-    init_transform[:3, 3] = translation
-    
-    source_aligned = o3d.geometry.PointCloud(source_scaled)
-    source_aligned.transform(init_transform)
-    
-    print(f"  Initial translation: {translation}")
-    
-    # Step 3: Compute normals for point-to-plane ICP
-    target_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30))
-    source_aligned.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30))
-    
-    # Step 4: ICP refinement
-    print(f"  Running ICP with threshold={icp_threshold}")
-    reg_result = o3d.pipelines.registration.registration_icp(
-        source_aligned, target_pcd, icp_threshold, np.eye(4),
-        o3d.pipelines.registration.TransformationEstimationPointToPlane()
-    )
-    
-    print(f"  ICP fitness: {reg_result.fitness:.4f}, RMSE: {reg_result.inlier_rmse:.4f}")
-    
-    # Apply ICP transformation
-    final_transform = reg_result.transformation @ init_transform
-    result_pcd = o3d.geometry.PointCloud(source_scaled)
-    result_pcd.transform(final_transform)
-    
-    # Visualize if requested
-    if visualize:
-        print("  Visualizing alignment...")
-        # Color source as red, target as blue
-        source_vis = o3d.geometry.PointCloud(source_pcd)
-        source_vis.paint_uniform_color([1, 0, 0])  # Red - original
-        
-        result_vis = o3d.geometry.PointCloud(result_pcd)
-        result_vis.paint_uniform_color([0, 1, 0])  # Green - aligned
-        
-        target_vis = o3d.geometry.PointCloud(target_pcd)
-        target_vis.paint_uniform_color([0, 0, 1])  # Blue - target wall
-        
-        o3d.visualization.draw_geometries([source_vis, result_vis, target_vis],
-                                         window_name=f"Alignment: {wall_surface.id}",
-                                         width=1280, height=720)
-    
-    return result_pcd, final_transform, reg_result.fitness
-
-
-def save_aligned_pointcloud(pcd: o3d.geometry.PointCloud, output_path: str, original_las_path: str):
-    """
-    Save aligned point cloud to LAS file, preserving original attributes.
-    
-    Args:
-        pcd: Aligned Open3D point cloud
-        output_path: Output LAS file path
-        original_las_path: Original LAS file to copy attributes from
-    """
-    print(f"  Saving to {output_path}")
-    
-    # Load original LAS for header info
-    original_las = laspy.read(original_las_path)
-    
-    # Create new LAS with same header
-    header = laspy.LasHeader(point_format=original_las.header.point_format,
-                             version=original_las.header.version)
-    # Recompute offset and scale from the ALIGNED points.
-    # The original header offset is no longer valid after the cloud has been
-    # moved to UTM/GML space, which causes OverflowError if we reuse it.
-    points = np.asarray(pcd.points)
-    header.offsets = np.min(points, axis=0)          # shift origin to min corner
-    header.scales  = np.array([0.001, 0.001, 0.001]) # 1 mm precision
-
-    new_las = laspy.LasData(header)
-    new_las.x = points[:, 0]
-    new_las.y = points[:, 1]
-    new_las.z = points[:, 2]
-    
-    # Copy colors if available
-    if pcd.has_colors():
-        colors = np.asarray(pcd.colors)
-        new_las.red = (colors[:, 0] * 65535).astype(np.uint16)
-        new_las.green = (colors[:, 1] * 65535).astype(np.uint16)
-        new_las.blue = (colors[:, 2] * 65535).astype(np.uint16)
-    elif hasattr(original_las, 'red'):
-        # Use original colors
-        new_las.red = original_las.red
-        new_las.green = original_las.green
-        new_las.blue = original_las.blue
-    
-    # Write to file
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    new_las.write(output_path)
-    print(f"  ✓ Saved {len(points):,} points")
-
+# ===========================================================================
+# Main
+# ===========================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Align point clouds to CityGML building model WallSurfaces"
+        description="Per-file fine ICP: align point clouds from 06_aligned_p2p to GML WallSurfaces"
     )
-    parser.add_argument('--gml_file', type=str,
-                       help='Path to CityGML file (if not provided, will prompt for selection)')
-    parser.add_argument('--gml_dir', type=str, default=DEFAULT_GML_DIR,
-                       help=f'Directory containing GML files (default: {DEFAULT_GML_DIR})')
-    parser.add_argument('--pointcloud_dir', type=str,
-                       help='Directory containing LAS point cloud files (if not provided, will prompt for selection)')
-    parser.add_argument('--pointcloud_base_dir', type=str, default=DEFAULT_POINTCLOUD_BASE_DIR,
-                       help=f'Base directory for point cloud folders (default: {DEFAULT_POINTCLOUD_BASE_DIR})')
-    parser.add_argument('--output_dir', type=str, default='outputs/07_aligned',
-                       help='Output directory for aligned point clouds')
-    parser.add_argument('--mapping_file', type=str,
-                       help='JSON file with pre-defined mappings (optional)')
-    parser.add_argument('--scale_mode', type=str, default='uniform',
-                       choices=['uniform', 'non-uniform', 'none'],
-                       help='Scaling mode for alignment')
-    parser.add_argument('--icp_threshold', type=float, default=1.0,
-                       help='Distance threshold for ICP registration')
+    parser.add_argument('--pc_dir',    default=DEFAULT_PC_DIR,
+                        help=f'Base directory containing subfolder(s) of .las files '
+                             f'(default: {DEFAULT_PC_DIR})')
+    parser.add_argument('--subfolder', default=None,
+                        help='Name of subfolder to process (skips interactive selection)')
+    parser.add_argument('--gml_dir',   default=DEFAULT_GML_DIR,
+                        help=f'Directory with .gml files (default: {DEFAULT_GML_DIR})')
+    parser.add_argument('--gml_file',  default=None,
+                        help='Path to GML file (skips interactive selection)')
+    parser.add_argument('--output_dir', default=DEFAULT_OUTPUT_DIR,
+                        help=f'Output base directory (default: {DEFAULT_OUTPUT_DIR})')
+    parser.add_argument('--density',   type=float, default=0.05,
+                        help='GML wall sampling density in metres (default: 0.05)')
+    parser.add_argument('--threshold', type=float, default=ICP_THRESHOLD,
+                        help=f'ICP max correspondence distance in metres (default: {ICP_THRESHOLD})')
+    parser.add_argument('--max_iter',  type=int,   default=ICP_MAX_ITER,
+                        help=f'ICP max iterations (default: {ICP_MAX_ITER})')
+    parser.add_argument('--normal_radius', type=float, default=ICP_NORMAL_RADIUS,
+                        help=f'Normal estimation radius in metres (default: {ICP_NORMAL_RADIUS})')
     parser.add_argument('--visualize', action='store_true',
-                       help='Visualize each alignment')
-    parser.add_argument('--visualize_walls', action='store_true',
-                       help='Only visualize wall surfaces and exit')
-    parser.add_argument('--merge_walls', action='store_true',
-                       help='Merge adjacent wall surfaces with similar normals before processing')
-    parser.add_argument('--normal_threshold', type=float, default=5.0,
-                       help='Normal angle threshold in degrees for merging (default: 5.0)')
-    parser.add_argument('--distance_threshold', type=float, default=2.0,
-                       help='Distance threshold in meters for adjacency detection (default: 2.0)')
-    
+                        help='Show Open3D before/after viewer for each file')
+    parser.add_argument('--visualize_gml', action='store_true',
+                        help='Show GML target cloud in viewer before ICP')
+
     args = parser.parse_args()
-    
-    # Select GML file if not provided
+
+    # ------------------------------------------------------------------
+    # 1. Choose subfolder
+    # ------------------------------------------------------------------
+    if args.subfolder:
+        subfolder_path = os.path.join(args.pc_dir, args.subfolder)
+        if not os.path.isdir(subfolder_path):
+            print(f"ERROR: Subfolder not found: {subfolder_path}")
+            return
+        print(f"\n✓ Using subfolder: {subfolder_path}")
+    else:
+        subfolder_path = select_subfolder(args.pc_dir)
+        if not subfolder_path:
+            print("Cancelled.")
+            return
+
+    subfolder_name = os.path.basename(subfolder_path)
+
+    las_files = sorted([
+        os.path.join(subfolder_path, f)
+        for f in os.listdir(subfolder_path)
+        if f.lower().endswith('.las')
+    ])
+    if not las_files:
+        print(f"ERROR: No .las files found in {subfolder_path}")
+        return
+
+    print(f"\n  Found {len(las_files)} .las file(s) in '{subfolder_name}':")
+    for p in las_files:
+        size_mb = os.path.getsize(p) / (1024 * 1024)
+        print(f"    {os.path.basename(p)}  ({size_mb:.1f} MB)")
+
+    # ------------------------------------------------------------------
+    # 2. Choose GML file
+    # ------------------------------------------------------------------
     if args.gml_file:
-        gml_file = args.gml_file
-        if not os.path.exists(gml_file):
-            print(f"ERROR: GML file not found: {gml_file}")
+        gml_path = args.gml_file
+        if not os.path.isfile(gml_path):
+            print(f"ERROR: GML file not found: {gml_path}")
             return
+        print(f"\n✓ Using GML: {gml_path}")
     else:
-        gml_file = select_gml_file(args.gml_dir)
-        if not gml_file:
-            print("Cancelled by user.")
+        gml_path = select_gml_file(args.gml_dir)
+        if not gml_path:
+            print("Cancelled.")
             return
-    
-    # Parse GML and extract wall surfaces
-    wall_surfaces = parse_gml_wallsurfaces(gml_file)
-    
-    if not wall_surfaces:
-        print("ERROR: No WallSurfaces found in GML file")
+
+    # ------------------------------------------------------------------
+    # 3. Parse GML → build combined target point cloud
+    # ------------------------------------------------------------------
+    walls = parse_gml_wallsurfaces(gml_path)
+    if not walls:
+        print("ERROR: No WallSurfaces found in GML file.")
         return
-    
-    # Merge wall surfaces if requested
-    if args.merge_walls:
-        wall_surfaces = merge_wall_surfaces(
-            wall_surfaces, 
-            normal_angle_threshold=args.normal_threshold,
-            distance_threshold=args.distance_threshold
+
+    target_pcd = gml_walls_to_pointcloud(walls, density=args.density)
+    if len(target_pcd.points) == 0:
+        print("ERROR: GML target cloud is empty — cannot run ICP.")
+        return
+
+    if args.visualize_gml:
+        visualize_target(target_pcd, walls)
+
+    # ------------------------------------------------------------------
+    # 4. Per-file ICP
+    # ------------------------------------------------------------------
+    output_subdir = os.path.join(args.output_dir, subfolder_name)
+    reports       = []
+
+    print(f"\n{'='*80}")
+    print(f"Running ICP for {len(las_files)} file(s) → output: {output_subdir}")
+    print(f"  threshold={args.threshold} m  max_iter={args.max_iter}  "
+          f"normal_radius={args.normal_radius} m")
+    print('=' * 80)
+
+    for las_path in las_files:
+        fname = os.path.basename(las_path)
+        print(f"\n[{fname}]")
+        print(f"  Loading ...")
+        source_pcd = load_las_as_pcd(las_path)
+        n_pts      = len(source_pcd.points)
+        print(f"  {n_pts:,} points  bbox_min={np.asarray(source_pcd.get_min_bound()).round(2)}"
+              f"  bbox_max={np.asarray(source_pcd.get_max_bound()).round(2)}")
+
+        transform, fitness, rmse = icp_align(
+            source_pcd,
+            target_pcd,
+            threshold=args.threshold,
+            max_iter=args.max_iter,
+            normal_radius=args.normal_radius,
+            visualize=args.visualize,
+            label=fname,
         )
-    
-    # Visualize walls if requested (--visualize_walls flag)
-    if args.visualize_walls:
-        visualize_wall_surfaces(wall_surfaces, density=0.05, show_viewer=True)
-        return
-    
-    # Select point cloud directory if not provided
-    if args.pointcloud_dir:
-        pc_dir_path = args.pointcloud_dir
-        if not os.path.exists(pc_dir_path):
-            print(f"ERROR: Point cloud directory not found: {pc_dir_path}")
-            return
-    else:
-        pc_dir_path = select_pointcloud_directory(args.pointcloud_base_dir)
-        if not pc_dir_path:
-            print("Cancelled by user.")
-            return
-    
-    # Find point cloud files
-    pc_dir = Path(pc_dir_path)
-    pc_files = sorted(pc_dir.glob('*.las'))
-    
-    if not pc_files:
-        print(f"ERROR: No .las files found in {args.pointcloud_dir}")
-        return
-    
-    print(f"\nFound {len(pc_files)} point cloud files")
-    
-    # Load or create mapping
-    if args.mapping_file and os.path.exists(args.mapping_file):
-        print(f"Loading mapping from {args.mapping_file}")
-        with open(args.mapping_file, 'r') as f:
-            mapping_data = json.load(f)
-        
-        # Convert wall IDs to indices
-        mapping = {}
-        for filename, wall_id in mapping_data.items():
-            if isinstance(wall_id, int):
-                mapping[filename] = wall_id
-            else:
-                # Find wall index by ID
-                for i, wall in enumerate(wall_surfaces):
-                    if wall.id == wall_id:
-                        mapping[filename] = i
-                        break
-    else:
-        # Interactive selection
-        mapping = interactive_wall_selection(wall_surfaces, [str(f) for f in pc_files])
-    
-    # Process each point cloud
-    alignment_report = {
-        'gml_file': gml_file,
-        'pointcloud_dir': pc_dir_path,
-        'scale_mode': args.scale_mode,
-        'icp_threshold': args.icp_threshold,
-        'alignments': []
-    }
-    
-    for pc_file in pc_files:
-        filename = pc_file.name
-        
-        if filename not in mapping:
-            print(f"\nSkipping {filename} (not in mapping)")
-            continue
-        
-        wall_idx = mapping[filename]
-        wall_surface = wall_surfaces[wall_idx]
-        
-        print(f"\n{'=' * 80}")
-        print(f"Processing: {filename} → WallSurface [{wall_idx}] {wall_surface.id}")
-        print('=' * 80)
-        
-        # Load point cloud
-        source_pcd = load_las_pointcloud(str(pc_file))
-        
-        # Align to wall
-        aligned_pcd, transform, fitness = align_pointcloud_to_wall(
-            source_pcd, wall_surface,
-            scale_mode=args.scale_mode,
-            icp_threshold=args.icp_threshold,
-            visualize=args.visualize
-        )
-        
-        # Save aligned point cloud
-        output_path = os.path.join(args.output_dir, filename)
-        save_aligned_pointcloud(aligned_pcd, output_path, str(pc_file))
-        
-        # Record in report
-        alignment_report['alignments'].append({
-            'pointcloud': filename,
-            'wall_surface': wall_surface.id,
-            'wall_index': wall_idx,
-            'fitness': fitness,
-            'transformation': transform.tolist()
+
+        out_path = os.path.join(output_subdir, fname)
+        save_las_with_transform(las_path, transform, out_path)
+
+        reports.append({
+            'file':         fname,
+            'input':        las_path,
+            'output':       out_path,
+            'fitness':      round(fitness, 6),
+            'inlier_rmse':  round(rmse, 6),
+            'transform':    transform.tolist(),
         })
-    
-    # Save alignment report
-    report_path = os.path.join(args.output_dir, 'alignment_report.json')
-    with open(report_path, 'w') as f:
-        json.dump(alignment_report, f, indent=2)
-    
-    print(f"\n{'=' * 80}")
-    print(f"Alignment complete!")
-    print(f"  Processed: {len(alignment_report['alignments'])} point clouds")
-    print(f"  Output directory: {args.output_dir}")
-    print(f"  Report: {report_path}")
+
+    # ------------------------------------------------------------------
+    # 5. Summary report
+    # ------------------------------------------------------------------
+    print(f"\n{'='*80}")
+    print("SUMMARY")
+    print('=' * 80)
+    for r in reports:
+        status = "✓" if r['fitness'] > 0.1 else "⚠"
+        print(f"  {status}  {r['file']:<30}  fitness={r['fitness']:.4f}  "
+              f"RMSE={r['inlier_rmse']:.4f} m")
+
+    os.makedirs(output_subdir, exist_ok=True)
+    report_path = os.path.join(output_subdir, 'icp_report.json')
+    with open(report_path, 'w') as fh:
+        json.dump({
+            'gml_file':    gml_path,
+            'subfolder':   subfolder_path,
+            'output_dir':  output_subdir,
+            'density':     args.density,
+            'threshold':   args.threshold,
+            'max_iter':    args.max_iter,
+            'normal_radius': args.normal_radius,
+            'files':       reports,
+        }, fh, indent=2)
+    print(f"\n  Report saved → {report_path}")
     print('=' * 80)
 
 

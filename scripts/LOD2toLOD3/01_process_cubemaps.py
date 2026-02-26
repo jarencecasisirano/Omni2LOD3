@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 from rectify import render_face
 
-def process_images(input_dir, output_dir):
+def process_images(input_dir, output_dir, pitch=0.0):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -37,7 +37,8 @@ def process_images(input_dir, output_dir):
                 'face': face,
                 'rotation': 0,
                 'interpolation': 'lanczos',
-                'maxWidth': 2048 # Adjust as needed
+                'maxWidth': 2048, # Adjust as needed
+                'pitch': pitch
             }
             
             result = render_face(params)
@@ -91,8 +92,21 @@ if __name__ == "__main__":
     INPUT_DIR = os.path.join(base_input_dir, selected_subdir)
     OUTPUT_DIR = os.path.join(base_output_dir, selected_subdir)
     
-    print(f"\nProcessing folder: {selected_subdir}")
-    print(f"Input: {INPUT_DIR}")
-    print(f"Output: {OUTPUT_DIR}")
+    # Prompt for X-axis (pitch) rotation
+    while True:
+        try:
+            pitch_input = input("\nEnter the X-axis camera pitch angle in degrees (positive = tilt up, negative = tilt down) [default 0]: ").strip()
+            if pitch_input == '':
+                pitch_angle = 0.0
+            else:
+                pitch_angle = float(pitch_input)
+            break
+        except ValueError:
+            print("Invalid input. Please enter a numeric value (e.g. 15, -10, 0).")
     
-    process_images(INPUT_DIR, OUTPUT_DIR)
+    print(f"\nProcessing folder: {selected_subdir}")
+    print(f"Input:  {INPUT_DIR}")
+    print(f"Output: {OUTPUT_DIR}")
+    print(f"Pitch:  {pitch_angle} degrees")
+    
+    process_images(INPUT_DIR, OUTPUT_DIR, pitch=pitch_angle)

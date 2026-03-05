@@ -1,44 +1,31 @@
 #!/usr/bin/env python3
 """
-07c_mesh_ballpivot.py — Ball-pivoting surface reconstruction from a point cloud
+07c_mesh_ballpivot_downsample.py — Ball-pivoting with hardcoded paths & 0.3 m voxel
 
-Reads a .las file from outputs/07_merged_las, estimates oriented normals,
-and runs Open3D's ball-pivoting algorithm (BPA) to create a 3D mesh.
-
-Ball-pivoting speed is dominated by point count.  The script therefore
-voxel-downsamples the cloud first (--voxel-size, default auto ~0.05 m),
-which typically reduces millions of raw scan points to tens-of-thousands
-and cuts runtime from hours to under a minute.
+Processes all .las files in INPUT_DIR, voxel-downsamples at 0.3 m,
+and writes BPA meshes to OUTPUT_DIR.
 
 Usage
 -----
     conda activate las-env
-    python scripts/LOD2toLOD3/07c_mesh_ballpivot.py [options]
-
-Options
--------
-    --voxel-size       Voxel side length for downsampling in metres.
-                       Default: auto (~5× median point spacing).
-                       Set to 0 to skip downsampling (WARNING: very slow).
-    --radii            Comma-separated ball radii in metres, e.g. 0.05,0.1,0.2
-                       Default: auto-computed from voxel size / point spacing.
-    --normal-radius    Radius for normal estimation in metres (default: 3× voxel).
-    --normal-nn        Max neighbours for normal estimation (default 30).
-    --file             Filename to process, skips interactive prompt.
+    python scripts/LOD2toLOD3/07c_mesh_ballpivot_downsample.py
 """
 
 
-import argparse
+import sys
 import numpy as np
 import open3d as o3d
 import laspy
 from pathlib import Path
 from scipy.spatial import cKDTree
 
-# ── paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR   = Path(__file__).resolve().parents[2]
-INPUT_DIR  = BASE_DIR / "outputs" / "07_merged_las"
-OUTPUT_DIR = BASE_DIR / "outputs" / "08_ballpivot_meshes"
+
+
+# ── hardcoded config ──────────────────────────────────────────────────────────
+INPUT_FILE  = Path("/home/khalil.torneros/07_merged_las/NIMBB-2-cleaned.las")
+OUTPUT_DIR  = Path("/home/khalil.torneros/07_mesh_ballpivot")
+VOXEL_SIZE  = 0.3          # metres
+NORMAL_NN   = 30
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -175,27 +162,12 @@ def run_ball_pivoting(
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Ball-pivoting 3D mesh from a LAS point cloud")
-    parser.add_argument("--voxel-size",    type=float, default=None,
-                        help="Voxel size for downsampling in metres (default auto). "
-                             "Set to 0 to skip (WARNING: very slow on large clouds).")
-    parser.add_argument("--radii",         type=str,   default=None,
-                        help="Comma-separated ball radii in metres, e.g. 0.05,0.1,0.2 "
-                             "(default: auto from voxel size)")
-    parser.add_argument("--normal-radius", type=float, default=None,
-                        help="Radius for normal estimation (default: 3× voxel size)")
-    parser.add_argument("--normal-nn",     type=int,   default=30,
-                        help="Max neighbours for normal estimation (default 30)")
-    parser.add_argument("--file",          type=str,   default=None,
-                        help="Filename to process, skips interactive prompt")
-    args = parser.parse_args()
-
     print("=" * 60)
-    print("  Ball-Pivoting Surface Reconstruction")
+    print("  Ball-Pivoting Surface Reconstruction  (voxel = 0.3 m)")
     print("=" * 60)
     print(f"\n  Input : {INPUT_DIR}")
     print(f"  Output: {OUTPUT_DIR}")
+    print(f"  Voxel : {VOXEL_SIZE} m")
 
     if not INPUT_DIR.exists():
         sys.exit(f"\nERROR: Input directory not found:\n  {INPUT_DIR}")
@@ -204,45 +176,10 @@ def main():
     if not las_files:
         sys.exit(f"\nERROR: No .las files found in:\n  {INPUT_DIR}")
 
-    # ── file selection ─────────────────────────────────────────────────────────
-    if args.file:
-        match = [f for f in las_files if f.stem == args.file or f.name == args.file]
-        if not match:
-            sys.exit(f"\nERROR: '{args.file}' not found.\n"
-                     f"  Available: {', '.join(f.stem for f in las_files)}")
-        selected_files = match
-    else:
-        print("\n  Available files:")
-        print("    0) ALL")
-        for idx, f in enumerate(las_files, start=1):
-            print(f"    {idx}) {f.name}")
-        choice = input(f"\n  Select file to process [0-{len(las_files)}]: ").strip()
-        try:
-            choice_idx = int(choice)
-        except ValueError:
-            sys.exit(f"\nERROR: Invalid selection: '{choice}'")
-        if choice_idx == 0:
-            selected_files = las_files
-        elif 1 <= choice_idx <= len(las_files):
-            selected_files = [las_files[choice_idx - 1]]
-        else:
-            sys.exit(f"\nERROR: Selection out of range: {choice_idx}")
-
-    # ── extra params ───────────────────────────────────────────────────────────
-    manual_radii: list[float] | None = None
-    if args.radii:
-        manual_radii = [float(r.strip()) for r in args.radii.split(",") if r.strip()]
-
-    print(f"\n  Params:")
-    print(f"    Voxel size     = {args.voxel_size if args.voxel_size is not None else 'auto'}")
-    print(f"    Normal radius  = {args.normal_radius if args.normal_radius else 'auto (3× voxel)'}")
-    print(f"    Normal max_nn  = {args.normal_nn}")
-    print(f"    Ball radii     = {manual_radii if manual_radii else 'auto'}")
-    print(f"  Files: {', '.join(f.name for f in selected_files)}")
-
+    print(f"  Files : {', '.join(f.name for f in las_files)}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    for las_path in selected_files:
+    for las_path in las_files:
         print(f"\n{'─' * 60}")
         print(f"  Processing: {las_path.name}")
         print(f"{'─' * 60}")
@@ -254,34 +191,26 @@ def main():
               f"{'  (with colour)' if len(pcd.colors) > 0 else ''}")
 
         # ── voxel downsample ──────────────────────────────────────────────────
-        if args.voxel_size == 0.0:
-            print("    Downsampling skipped (--voxel-size 0)  — this may be slow")
-            ds_pcd = pcd
-            voxel  = compute_spacing(pcd) * 2.0
-        else:
-            voxel = args.voxel_size if args.voxel_size else compute_auto_voxel(pcd)
-            print(f"    Voxel downsampling  (voxel={voxel:.4f} m) …")
-            ds_pcd = voxel_downsample(pcd, voxel)
+        print(f"    Voxel downsampling  (voxel={VOXEL_SIZE:.4f} m) …")
+        ds_pcd = voxel_downsample(pcd, VOXEL_SIZE)
 
         # ── normals ───────────────────────────────────────────────────────────
-        normal_radius = args.normal_radius if args.normal_radius else voxel * 3.0
-        estimate_normals(ds_pcd, radius=normal_radius, max_nn=args.normal_nn)
+        normal_radius = VOXEL_SIZE * 3.0
+        estimate_normals(ds_pcd, radius=normal_radius, max_nn=NORMAL_NN)
 
         # ── ball radii ────────────────────────────────────────────────────────
-        if manual_radii:
-            radii = manual_radii
-        else:
-            spacing = compute_spacing(ds_pcd)
-            radii   = compute_auto_radii(spacing)
+        spacing = compute_spacing(ds_pcd)
+        radii   = compute_auto_radii(spacing)
 
         mesh = run_ball_pivoting(ds_pcd, radii)
 
         out_path = OUTPUT_DIR / f"{las_path.stem}_bpa.obj"
         o3d.io.write_triangle_mesh(str(out_path), mesh, write_vertex_colors=True)
-        print(f"\n  ✓ Saved: {out_path}")
+        elapsed = time.perf_counter() - t_total
+        print(f"\n  ✓ Saved: {out_path}  [{elapsed:.1f}s total]")
 
     print(f"\n{'=' * 60}")
-    print(f"  Done — {len(selected_files)} mesh(es) written to {OUTPUT_DIR}")
+    print(f"  Done — {len(las_files)} mesh(es) written to {OUTPUT_DIR}")
     print("=" * 60)
 
 

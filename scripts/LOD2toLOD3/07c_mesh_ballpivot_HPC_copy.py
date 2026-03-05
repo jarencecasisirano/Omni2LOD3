@@ -33,14 +33,15 @@ Notes
   radii from 1× to 8× the median nearest-neighbour distance.
 """
 from pathlib import Path
+import sys
 import numpy as np
 import open3d as o3d
 import laspy
 from scipy.spatial import cKDTree
 
 # ── paths (hardcoded for HPC) ─────────────────────────────────────────────────
-INPUT_FILE  = Path("/home/khalil.torneros/07_merged_las/NIMBB-2-cleaned.las")
-OUTPUT_DIR  = Path("/home/khalil.torneros/07_mesh_ballpivot")
+INPUT_FILE  = Path("/home/demi/Omni2LOD3/outputs/07_merged_las/NIMBB-2-cleaned.las")
+OUTPUT_DIR  = Path("/home/demi/Omni2LOD3/trial")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

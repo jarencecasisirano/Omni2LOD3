@@ -3,7 +3,7 @@ import open3d as o3d
 import laspy
 from pathlib import Path
 
-print("Loading point cloud...")
+print("Loading mesh...")
 alpha = 10.0
 las_path = Path("outputs/07_merged_las/NIMBB-2-curve.las")
 las    = laspy.read(str(las_path))

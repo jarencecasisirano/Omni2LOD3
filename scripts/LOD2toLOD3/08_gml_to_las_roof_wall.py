@@ -56,11 +56,12 @@ def _extract_polygons(root, surface_xpath: str):
 
 
 def parse_surfaces(gml_file: str):
-    """Return (roof_polys, wall_polys) each as list of (id, Nx3 coords)."""
+    """Return (roof_polys, wall_polys, ground_polys) each as list of (id, Nx3 coords)."""
     root = etree.parse(gml_file).getroot()
-    roofs = _extract_polygons(root, 'bldg:RoofSurface')
-    walls = _extract_polygons(root, 'bldg:WallSurface')
-    return roofs, walls
+    roofs   = _extract_polygons(root, 'bldg:RoofSurface')
+    walls   = _extract_polygons(root, 'bldg:WallSurface')
+    grounds = _extract_polygons(root, 'bldg:GroundSurface')
+    return roofs, walls, grounds
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +193,8 @@ def main():
         out_path = os.path.join(OUTPUT_DIR, f"{basename}.las")
 
         print(f"Processing: {os.path.basename(gml_path)}")
-        roof_polys, wall_polys = parse_surfaces(gml_path)
-        print(f"  Roofs: {len(roof_polys)} polygon(s),  Walls: {len(wall_polys)} polygon(s)")
+        roof_polys, wall_polys, ground_polys = parse_surfaces(gml_path)
+        print(f"  Roofs: {len(roof_polys)},  Walls: {len(wall_polys)},  Grounds: {len(ground_polys)} polygon(s)")
 
         # ---- 1. Sample full roof surfaces --------------------------------
         all_points = []
@@ -230,6 +231,15 @@ def main():
                 wall_pts_total += len(pts)
 
         print(f"  Matched walls: {matched_walls}  →  wall points: {wall_pts_total:,}")
+
+        # ---- 4. Sample full ground surfaces ------------------------------
+        ground_pts_total = 0
+        for _, coords in ground_polys:
+            pts = sample_polygon(coords)
+            if len(pts):
+                all_points.append(pts)
+                ground_pts_total += len(pts)
+        print(f"  Ground points sampled: {ground_pts_total:,}")
 
         if not all_points:
             print("  ⚠  No points sampled — skipping")

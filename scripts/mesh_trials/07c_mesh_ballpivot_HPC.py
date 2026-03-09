@@ -32,18 +32,15 @@ Notes
   too large → triangles bridging across gaps. Auto-mode tries a spread of
   radii from 1× to 8× the median nearest-neighbour distance.
 """
-
-import sys
+from pathlib import Path
 import numpy as np
 import open3d as o3d
 import laspy
-from pathlib import Path
 from scipy.spatial import cKDTree
 
 # ── paths (hardcoded for HPC) ─────────────────────────────────────────────────
-BASE_DIR    = Path(__file__).resolve().parents[2]
-INPUT_FILE  = Path("/home/demi/Omni2LOD3/outputs/07_merged_las/NIMBB-2-cleaned.las")
-OUTPUT_DIR  = BASE_DIR  # output to project root
+INPUT_FILE  = Path("/home/khalil.torneros/07_merged_las/NIMBB-2-cleaned.las")
+OUTPUT_DIR  = Path("/home/khalil.torneros/07_mesh_ballpivot")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ from lxml import etree
 INPUT_DIR       = 'outputs/00_gml_wall_merged'
 OUTPUT_DIR      = 'outputs/08_roof_wall_points'
 DENSITY         = 0.05    # metres — approx spacing between sampled points
-WALL_DROP       = 1.0     # metres below roof edge to keep
+WALL_DROP       = 10     # metres below roof edge to keep
 VERTEX_TOL_XY   = 0.01    # metres — XY tolerance for shared-vertex matching
 
 NAMESPACES = {

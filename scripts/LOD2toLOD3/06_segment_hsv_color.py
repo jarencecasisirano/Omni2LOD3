@@ -70,7 +70,7 @@ def rgb_to_hsv_array(rgb):
 # =====================================================================
 # Main segmentation pipeline
 # =====================================================================
-def segment_by_hsv(file_path, output_dir, n_clusters=5, hsv_weights=(1.0, 2.0, 1.0),
+def segment_by_hsv(file_path, output_dir, n_clusters=5, hsv_weights=(2.0, 3.0, 0.3),
                    use_minibatch=True, random_state=42):
     """
     Segment a point cloud by clustering HSV color values.
@@ -225,12 +225,12 @@ def main():
                         help="Output directory")
     parser.add_argument("--n_clusters", type=int, default=5,
                         help="Number of color clusters")
-    parser.add_argument("--weight_h", type=float, default=1.0,
-                        help="Weight for Hue channel in clustering")
-    parser.add_argument("--weight_s", type=float, default=2.0,
-                        help="Weight for Saturation channel (higher = more emphasis on color purity)")
-    parser.add_argument("--weight_v", type=float, default=1.0,
-                        help="Weight for Value/brightness channel")
+    parser.add_argument("--weight_h", type=float, default=2.0,
+                        help="Weight for Hue channel in clustering (default: 2.0)")
+    parser.add_argument("--weight_s", type=float, default=3.0,
+                        help="Weight for Saturation channel (default: 3.0, higher = more emphasis on color purity)")
+    parser.add_argument("--weight_v", type=float, default=0.3,
+                        help="Weight for Value/brightness channel (default: 0.3, lower = less sensitive to shadows)")
     args = parser.parse_args()
 
     hsv_weights = (args.weight_h, args.weight_s, args.weight_v)

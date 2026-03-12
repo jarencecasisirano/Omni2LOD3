@@ -31,7 +31,7 @@ LABEL_MAP = {
 LABEL_NAMES = {v: k.capitalize() for k, v in LABEL_MAP.items()}
 
 INPUT_DIR = "outputs/09_labelled"
-OUTPUT_DIR = "outputs/10_facade_features"
+OUTPUT_DIR = "outputs/11_facade_features_classified"
 
 
 def select_file(directory):
@@ -53,6 +53,7 @@ def select_file(directory):
     while True:
         try:
             choice = input(f"Select file [1-{len(files)}]: ").strip()
+            if not choice: continue
             idx = int(choice) - 1
             if 0 <= idx < len(files):
                 return files[idx]
@@ -63,8 +64,16 @@ def select_file(directory):
 
 def main():
     # 1. Select file
-    file_path = select_file(INPUT_DIR)
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+        if not os.path.exists(file_path):
+            print(f"Error: File not found: {file_path}")
+            sys.exit(1)
+    else:
+        file_path = select_file(INPUT_DIR)
+
     filename = os.path.basename(file_path)
+    base_name = os.path.splitext(filename)[0]
     print(f"\n  Loading: {filename}")
 
     # 2. Load
@@ -73,61 +82,50 @@ def main():
     classifications = np.array(las.classification, dtype=np.uint8)
     print(f"  Total points: {n_total:,}")
 
-    # 3. Show current label breakdown
-    print(f"\n  Label breakdown:")
-    unique, counts = np.unique(classifications, return_counts=True)
-    for code, count in zip(unique, counts):
-        name = LABEL_NAMES.get(code, f"Unknown({code})")
-        pct = 100.0 * count / n_total
-        marker = "  ← REMOVING" if code == LABEL_MAP["wall"] else ""
-        print(f"    {name:12s}: {count:>10,} pts ({pct:5.1f}%){marker}")
-
-    # 4. Remove wall points
-    wall_code = LABEL_MAP["wall"]
-    keep_mask = classifications != wall_code
-    n_kept = int(keep_mask.sum())
-    n_removed = n_total - n_kept
-    print(f"\n  Removing {n_removed:,} Wall points...")
-    print(f"  Keeping  {n_kept:,} feature points")
-
-    if n_kept == 0:
-        print("  WARNING: No points remain after removing walls!")
-        return
-
-    # 5. Build output LAS
-    header = laspy.LasHeader(point_format=2, version="1.2")
-    header.scales = las.header.scales
-    header.offsets = las.header.offsets
-
-    new_las = laspy.LasData(header)
-    new_las.x = np.array(las.x)[keep_mask]
-    new_las.y = np.array(las.y)[keep_mask]
-    new_las.z = np.array(las.z)[keep_mask]
-    new_las.red = np.array(las.red)[keep_mask]
-    new_las.green = np.array(las.green)[keep_mask]
-    new_las.blue = np.array(las.blue)[keep_mask]
-    new_las.classification = classifications[keep_mask]
-
-    # 6. Save
+    # 3. Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_name = filename.replace("labelled_", "features_")
-    if out_name == filename:
-        out_name = f"features_{filename}"
-    output_path = os.path.join(OUTPUT_DIR, out_name)
 
-    new_las.write(output_path)
+    # 4. Process each unique class
+    print(f"\n  Extracting classes to: {OUTPUT_DIR}")
+    unique_codes, counts = np.unique(classifications, return_counts=True)
+    
+    for code, count in zip(unique_codes, counts):
+        class_name = LABEL_NAMES.get(code, f"Class_{code}")
+        print(f"    - {class_name:12s}: {count:>10,} pts", end="", flush=True)
 
-    print(f"\n  Saved: {output_path}")
+        mask = classifications == code
+        if not np.any(mask):
+            print(" (Skipping, no points)")
+            continue
 
-    # Final summary
+        # Build output LAS
+        header = laspy.LasHeader(point_format=las.header.point_format, version=las.header.version)
+        header.scales = las.header.scales
+        header.offsets = las.header.offsets
+
+        new_las = laspy.LasData(header)
+        new_las.x = np.array(las.x)[mask]
+        new_las.y = np.array(las.y)[mask]
+        new_las.z = np.array(las.z)[mask]
+
+        # Preserve colors if they exist
+        if hasattr(las, 'red'):
+            new_las.red = np.array(las.red)[mask]
+            new_las.green = np.array(las.green)[mask]
+            new_las.blue = np.array(las.blue)[mask]
+        
+        new_las.classification = classifications[mask]
+
+        # Save
+        clean_name = base_name.replace("labelled_", "")
+        out_filename = f"features_{clean_name}_{class_name.lower()}.las"
+        output_path = os.path.join(OUTPUT_DIR, out_filename)
+        
+        new_las.write(output_path)
+        print(f" -> {out_filename}")
+
     print(f"\n{'='*60}")
-    print(f"  RESULT")
-    print(f"{'='*60}")
-    unique, counts = np.unique(classifications[keep_mask], return_counts=True)
-    for code, count in zip(unique, counts):
-        name = LABEL_NAMES.get(code, f"Unknown({code})")
-        pct = 100.0 * count / n_kept
-        print(f"    {name:12s}: {count:>10,} pts ({pct:5.1f}%)")
+    print(f"  DONE: Extracted {len(unique_codes)} classes.")
     print(f"{'='*60}\n")
 
 

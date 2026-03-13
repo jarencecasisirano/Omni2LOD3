@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-Facade Features → CityGML LOD3 Pipeline.
+Facade Features → CityGML LOD3 Pipeline  (with curved-geometry tessellation).
 
-Clusters facade feature points with DBSCAN, creates alpha-shape meshes,
-converts them to CityGML LOD3 semantics (Window, Door, BuildingInstallation),
-and appends them to an existing LOD2 GML model.
+Points are sorted by semantic label (window / door / other), then each label
+group is *tessellated* directly into a series of **axis-aligned rectangular
+prisms** (slabs) snapped to the corresponding LOD2 WallSurface normal.  The
+slabs form a staircase approximation of any curved profile (arched windows,
+bay windows, rounded protrusions), similar in spirit to the planar-facet
+decomposition used by the geoflow3d/geoflow-bundle project.
 
 Usage:
-    conda activate lidar-test
-    python scripts/LOD2toLOD3/10_features_to_gml.py [options]
+    conda activate las-env
+    python scripts/LOD2toLOD3/11_curve_handling.py [options]
 
 Options:
-    --eps             DBSCAN neighbourhood radius (default: 0.3)
-    --min_samples     DBSCAN minimum cluster size (default: 30)
-    --poisson_depth   Poisson reconstruction depth (default: 6)
+    --n_slabs         Tessellation slabs per label group along wall tangent (default: 20)
+    --slab_thickness  Half-depth of each slab in wall-normal direction, metres (default: 0.15)
+    --min_pts_slab    Minimum points needed for a slab to be emitted (default: 5)
 """
 
 import os
@@ -21,12 +24,10 @@ import sys
 import glob
 import uuid
 import argparse
-import re
 import xml.etree.ElementTree as ET
 
 import numpy as np
 import laspy
-from sklearn.cluster import DBSCAN
 
 
 # =====================================================================
@@ -43,7 +44,7 @@ LABEL_MAP = {
 LABEL_NAMES = {v: k for k, v in LABEL_MAP.items()}
 
 INPUT_DIR  = "outputs/trials"
-GML_DIR    = "outputs/00_gml_wall_merged"
+GML_DIR    = "outputs/trials"
 OUTPUT_DIR = "outputs/trials"
 
 
@@ -77,59 +78,39 @@ def select_file(directory, pattern="*.las"):
 
 
 # =====================================================================
-# DBSCAN clustering — per-label, then spatial proximity
+# Label grouping (no clustering — one feature per semantic class)
 # =====================================================================
-def cluster_features(points, labels, eps, min_samples):
+def group_by_label(points, labels):
     """
-    Sort points by semantic label first, then run DBSCAN independently
-    within each label group.  This prevents windows/doors from being
-    merged with 'other' structural features.
+    Partition *points* into one feature per semantic label group.
 
-    Label groups (by LABEL_MAP value):
-      - window  (4)
-      - door    (3)
-      - other / wall / roof / ground  → all mapped to 'other' or their name
+    Label mapping:
+      window (4)  → 'window'
+      door   (3)  → 'door'
+      everything else → 'other'
 
-    Returns list of dicts:
+    Returns a list of dicts sorted by point count (descending):
         { 'type': str, 'points': ndarray(N,3), 'n_points': int }
     """
-    # Canonical per-label name (collapse everything that isn't window/door)
     def _label_group(code):
         name = LABEL_NAMES.get(int(code), 'other')
-        if name in ('window', 'door'):
-            return name
-        return 'other'
+        return name if name in ('window', 'door') else 'other'
 
-    # Unique groups present in this point cloud
     label_groups = sorted(set(_label_group(c) for c in labels))
     print(f"\n  Label groups present: {label_groups}")
 
     features = []
     for group in label_groups:
-        # Build mask for this group
-        mask = np.array([_label_group(c) == group for c in labels])
+        mask      = np.array([_label_group(c) == group for c in labels])
         group_pts = points[mask]
         if len(group_pts) == 0:
             continue
-
-        print(f"  Running DBSCAN on '{group}' ({len(group_pts):,} pts, "
-              f"eps={eps}, min_samples={min_samples}) ...")
-        db = DBSCAN(eps=eps, min_samples=min_samples)
-        cluster_ids = db.fit_predict(group_pts)
-
-        unique_clusters = set(cluster_ids)
-        unique_clusters.discard(-1)
-        n_noise = int((cluster_ids == -1).sum())
-        print(f"    → {len(unique_clusters)} clusters, "
-              f"{n_noise:,} noise points discarded")
-
-        for cid in sorted(unique_clusters):
-            cmask = cluster_ids == cid
-            features.append({
-                'type':     group,
-                'points':   group_pts[cmask],
-                'n_points': int(cmask.sum()),
-            })
+        print(f"  Group '{group}': {len(group_pts):,} pts")
+        features.append({
+            'type':     group,
+            'points':   group_pts,
+            'n_points': len(group_pts),
+        })
 
     features.sort(key=lambda f: f['n_points'], reverse=True)
     return features
@@ -143,9 +124,6 @@ def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
     Extract horizontal (XY-plane) unit normals from every WallSurface polygon
     found inside a CityGML file, then cluster near-parallel normals and return
     only the *dominant* direction for each cluster.
-
-    This avoids noisy slivers biasing the normal selection.  Normals that
-    differ by less than *angle_tol_deg* are merged.
 
     Returns a list of dominant 2-D unit vectors.
     """
@@ -194,19 +172,15 @@ def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
         print("  WARNING: no wall normals found in GML.")
         return []
 
-    # ── Cluster near-parallel normals and keep dominant directions ──
-    # Two normals are "same direction" if the angle between them (or their
-    # opposites) is < angle_tol_deg.
+    # ── Cluster near-parallel normals ──────────────────────────────
     tol_cos = np.cos(np.radians(angle_tol_deg))
-    dominant = []  # list of (representative_normal, count)
+    dominant = []
     raw_normals_arr = np.array(raw_normals)
 
     for nv in raw_normals_arr:
         matched = False
         for idx, (rep, cnt) in enumerate(dominant):
-            # Accept n or -n as same wall face
             if abs(float(np.dot(nv, rep))) >= tol_cos:
-                # Running average (Welford-style direction update)
                 new_rep = rep * cnt + nv * np.sign(float(np.dot(nv, rep)))
                 nr = np.linalg.norm(new_rep)
                 dominant[idx] = (new_rep / nr if nr > 1e-9 else rep, cnt + 1)
@@ -215,7 +189,6 @@ def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
         if not matched:
             dominant.append((nv, 1))
 
-    # Sort by frequency, return the most common directions
     dominant.sort(key=lambda x: x[1], reverse=True)
     dominant_normals = [d[0] for d in dominant]
 
@@ -230,35 +203,27 @@ def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
 def _best_wall_normal(points, wall_normals):
     """
     Given a point cluster and a list of candidate 2-D horizontal wall normals,
-    return the wall normal whose perpendicular direction best aligns with the
-    cluster's dominant horizontal spread axis (i.e. the cluster lies *on* a
-    wall, so the spread axis is the wall tangent and the normal is perpendicular
-    to that).
-
-    Returns a normalised 3-D vector (wall normal, with Z=0).
+    return the wall normal (as a 3-D vector with Z=0) whose tangent direction
+    best aligns with the cluster's dominant horizontal spread axis.
     """
     if not wall_normals:
         return None
 
-    # PCA on XY to find the horizontal spread direction (tangent to the wall)
     xy = points[:, :2]
     cxy = xy - xy.mean(axis=0)
     cov = cxy.T @ cxy
-    eig_vals, eig_vecs = np.linalg.eigh(cov)  # ascending order
-    # Largest eigenvalue → first principal direction = wall tangent (along wall)
-    tangent_2d = eig_vecs[:, 1]   # index 1 = largest
+    eig_vals, eig_vecs = np.linalg.eigh(cov)
+    tangent_2d = eig_vecs[:, 1]   # largest eigenvalue → wall tangent
 
-    # The wall normal is perpendicular to the tangent in XY
     cluster_normal_2d = np.array([-tangent_2d[1], tangent_2d[0]])
 
-    # Pick the candidate wall normal most aligned with our estimate
-    best_n = None
+    best_n   = None
     best_dot = -1.0
     for wn in wall_normals:
         dot = abs(float(np.dot(cluster_normal_2d, wn)))
         if dot > best_dot:
             best_dot = dot
-            best_n = wn
+            best_n   = wn
 
     if best_n is None:
         return None
@@ -266,89 +231,136 @@ def _best_wall_normal(points, wall_normals):
     return np.array([best_n[0], best_n[1], 0.0])
 
 
-def create_bbox_polygons(points, wall_normal=None):
-    """
-    Create a 3D axis-aligned (to wall) Bounding Box from a point cluster.
-
-    If *wall_normal* (a unit 3-D vector with Z=0) is given, the box is oriented
-    so that two faces are parallel to the LOD2 WallSurface:
-      axis0 = wall_normal          (depth direction, into/out of wall)
-      axis1 = tangent along wall   (= cross(Z, wall_normal), normalised)
-      axis2 = world Z              (vertical)
-
-    If no wall_normal is given, PCA is used as fallback.
-
-    Returns a list of 6 closed polygons (faces of the box).
-    """
-    if len(points) < 3:
-        return []
-
-    centroid = points.mean(axis=0)
-    centered = points - centroid
-
-    if wall_normal is not None:
-        # ── Wall-aligned axes ──────────────────────────────────────────
-        wn = np.asarray(wall_normal, dtype=np.float64)
-        wn = wn / np.linalg.norm(wn)                      # depth axis
-
-        z_up = np.array([0.0, 0.0, 1.0])
-        tangent = np.cross(z_up, wn)                      # along-wall axis
-        t_norm = np.linalg.norm(tangent)
-        if t_norm < 1e-9:                                  # degenerate fallback
-            tangent = np.array([1.0, 0.0, 0.0])
-        else:
-            tangent = tangent / t_norm
-
-        # Orthonormal frame: [wall_normal, tangent, Z]
-        axes = np.column_stack([wn, tangent, z_up])        # shape (3, 3)
-    else:
-        # ── PCA fallback ───────────────────────────────────────────────
-        cov = np.cov(centered, rowvar=False)
-        eig_vals, eig_vecs = np.linalg.eigh(cov)
-        idx = eig_vals.argsort()[::-1]
-        axes = eig_vecs[:, idx]
-
-    # Project points onto chosen axes
-    projected = centered @ axes       # (N, 3)
-    p_min = projected.min(axis=0)
-    p_max = projected.max(axis=0)
-
-    # 8 box corners in local frame
-    v_proj = np.array([
-        [p_min[0], p_min[1], p_min[2]],   # 0
-        [p_max[0], p_min[1], p_min[2]],   # 1
-        [p_max[0], p_max[1], p_min[2]],   # 2
-        [p_min[0], p_max[1], p_min[2]],   # 3
-        [p_min[0], p_min[1], p_max[2]],   # 4
-        [p_max[0], p_min[1], p_max[2]],   # 5
-        [p_max[0], p_max[1], p_max[2]],   # 6
-        [p_min[0], p_max[1], p_max[2]],   # 7
-    ])
-
-    # Transform back to world space
-    v_world = (v_proj @ axes.T) + centroid
-
-    # 6 faces
-    face_indices = [
-        [0, 1, 2, 3],   # Bottom
-        [4, 7, 6, 5],   # Top
-        [0, 3, 7, 4],   # Wall-parallel face A (min depth)
-        [1, 5, 6, 2],   # Wall-parallel face B (max depth)
-        [0, 4, 5, 1],   # Side A
-        [3, 2, 6, 7],   # Side B
-    ]
-
-    polygons = []
-    for indices in face_indices:
-        poly = [tuple(v_world[i]) for i in indices]
-        poly.append(poly[0])    # close ring
-        polygons.append(poly)
-
-    return polygons
 
 
 # =====================================================================
-# CityGML XML generation (string-based for reliable namespace handling)
+# Tessellation — curved cluster → staircase of rectangular prisms
+# =====================================================================
+def tessellate_curved_cluster(points, wall_normal, n_slabs,
+                              slab_thickness, min_pts_slab):
+    """
+    Discretise a point group into a staircase of axis-aligned rectangular
+    prisms, each snapped to the wall normal direction.
+
+    Coordinate frame
+    ----------------
+      axis0 = wall_normal   (depth direction, into/out-of wall)
+      axis1 = tangent        (along wall, horizontal)
+      axis2 = world Z        (vertical)
+
+    Algorithm
+    ---------
+    1. Project all points onto (depth, tangent, height) local frame.
+    2. Divide the tangent range into n_slabs equal columns.
+    3. For each column:
+         a. Collect points in [t_lo, t_hi].
+         b. depth_mid = mean depth of the points in THAT column.
+            This varies per slab, creating the curved/staircase profile.
+         c. depth_lo = depth_mid - slab_thickness
+            depth_hi = depth_mid + slab_thickness
+         d. z range = [z_min, z_max] of those points.
+         e. Emit 6-face prism from (depth_lo, t_lo, z_lo) to
+                                    (depth_hi, t_hi, z_hi).
+
+    Returns
+    -------
+    list of prism_face_lists.
+      Each entry is a list of 6 closed quad polygons (list of 5 tuples).
+    """
+    if len(points) < min_pts_slab:
+        return []
+
+    # Build orthonormal frame
+    wn = np.asarray(wall_normal, dtype=np.float64)
+    wn = wn / np.linalg.norm(wn)
+
+    z_up   = np.array([0.0, 0.0, 1.0])
+    tangent = np.cross(z_up, wn)
+    t_norm  = np.linalg.norm(tangent)
+    if t_norm < 1e-9:
+        tangent = np.array([1.0, 0.0, 0.0])
+    else:
+        tangent = tangent / t_norm
+
+    # axes columns: [wn, tangent, z_up]
+    axes = np.column_stack([wn, tangent, z_up])   # (3, 3)
+
+    # Project points
+    projected = points @ axes        # (N, 3) in (depth, tang, height)
+
+    t_min = projected[:, 1].min()
+    t_max = projected[:, 1].max()
+    if t_max - t_min < 1e-6:
+        return []
+
+    delta = (t_max - t_min) / n_slabs
+
+    prism_list = []
+    for i in range(n_slabs):
+        t_lo = t_min + i * delta
+        t_hi = t_lo + delta
+
+        # Points in this slab column (inclusive at boundaries)
+        if i < n_slabs - 1:
+            mask = (projected[:, 1] >= t_lo) & (projected[:, 1] < t_hi)
+        else:
+            mask = (projected[:, 1] >= t_lo) & (projected[:, 1] <= t_hi)
+
+        col_pts = projected[mask]
+        if len(col_pts) < min_pts_slab:
+            continue
+
+        # Depth: use this column's own mean depth so each slab sits at its
+        # actual position along the wall normal — this is what produces the
+        # curved / staircase profile.
+        depth_center = float(col_pts[:, 0].mean())
+        depth_lo = depth_center - slab_thickness
+        depth_hi = depth_center + slab_thickness
+
+        z_lo = float(col_pts[:, 2].min())
+        z_hi = float(col_pts[:, 2].max())
+
+        if z_hi - z_lo < 1e-4:
+            continue    # degenerate slab, skip
+
+        # 8 corners in local frame (depth, tang, height)
+        corners_local = np.array([
+            [depth_lo, t_lo, z_lo],   # 0
+            [depth_hi, t_lo, z_lo],   # 1
+            [depth_hi, t_hi, z_lo],   # 2
+            [depth_lo, t_hi, z_lo],   # 3
+            [depth_lo, t_lo, z_hi],   # 4
+            [depth_hi, t_lo, z_hi],   # 5
+            [depth_hi, t_hi, z_hi],   # 6
+            [depth_lo, t_hi, z_hi],   # 7
+        ])
+
+        # Back to world space:  world = local @ axes.T
+        corners_world = corners_local @ axes.T   # (8, 3)
+
+        # 6 faces (quad, CCW when viewed from outside)
+        face_indices = [
+            [0, 3, 2, 1],   # Bottom  (z_lo)
+            [4, 5, 6, 7],   # Top     (z_hi)
+            [0, 1, 5, 4],   # Front   (t_lo face)
+            [3, 7, 6, 2],   # Back    (t_hi face)
+            [0, 4, 7, 3],   # Left    (depth_lo, wall-parallel)
+            [1, 2, 6, 5],   # Right   (depth_hi, wall-parallel)
+        ]
+
+        faces = []
+        for fi in face_indices:
+            ring = [tuple(corners_world[k]) for k in fi]
+            ring.append(ring[0])    # close ring
+            faces.append(ring)
+
+        prism_list.append(faces)
+
+    return prism_list
+
+
+# =====================================================================
+# CityGML XML helpers
 # =====================================================================
 def _make_multi_surface(gml_id, polygons):
     """Build a <gml:MultiSurface> XML string from polygon list."""
@@ -369,14 +381,18 @@ def _make_multi_surface(gml_id, polygons):
     return "\n".join(members)
 
 
-def feature_to_gml(feature_type, gml_id, polygons):
+def feature_to_gml(feature_type, gml_id, all_polygons):
     """
     Generate a CityGML XML fragment for one feature.
 
+    all_polygons is a flat list of polygon rings (each ring is a closed
+    list of (x,y,z) tuples).  The rings come from all prism faces of a
+    single tessellated cluster.
+
     Window / Door    → bldg:opening inside a bldg:WallSurface
-    building_part    → bldg:consistsOfBuildingPart > bldg:BuildingPart
+    other            → bldg:outerBuildingInstallation
     """
-    ms = _make_multi_surface(gml_id, polygons)
+    ms = _make_multi_surface(gml_id, all_polygons)
 
     if feature_type == "window":
         return (
@@ -451,35 +467,30 @@ def append_to_gml(gml_path, gml_fragments, output_path):
 # =====================================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert facade features to CityGML LOD3")
-    parser.add_argument("--eps", type=float, default=0.3,
-                        help="DBSCAN eps (neighbourhood radius)")
-    parser.add_argument("--min_samples", type=int, default=30,
-                        help="DBSCAN min_samples")
-
+        description="Facade Features → CityGML LOD3 (curved geometry via tessellation)")
+    parser.add_argument("--n_slabs",        type=int,   default=20,
+                        help="Number of tessellation slabs per label group "
+                             "along the wall tangent direction")
+    parser.add_argument("--slab_thickness", type=float, default=0.15,
+                        help="Half-depth of each slab in the wall-normal "
+                             "direction (metres). The prism spans "
+                             "[depth_mid - t, depth_mid + t].")
+    parser.add_argument("--min_pts_slab",   type=int,   default=5,
+                        help="Minimum points required for a slab to be emitted")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  Facade Features → CityGML LOD3")
+    print("  Facade Features → CityGML LOD3  [curved tessellation]")
     print("=" * 60)
 
     # ── 1. Select point cloud ──────────────────────────────────────
     las_path = select_file(INPUT_DIR, "*.las")
-    las_fname = os.path.basename(las_path).lower()
     print(f"\n  Loading: {os.path.basename(las_path)}")
 
-    # Infer default feature type from filename
-    inferred_type = "other"
-    if "window" in las_fname:
-        inferred_type = "window"
-    elif "door" in las_fname:
-        inferred_type = "door"
-    print(f"  Inferred feature type: {inferred_type}")
-
     las = laspy.read(las_path)
-    points = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
+    points          = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
     classifications = np.array(las.classification, dtype=np.uint8)
-    n_total = len(points)
+    n_total         = len(points)
     print(f"  Total points: {n_total:,}")
 
     # Label breakdown
@@ -487,96 +498,112 @@ def main():
     unique, counts = np.unique(classifications, return_counts=True)
     for code, count in zip(unique, counts):
         name = LABEL_NAMES.get(code, f"Unknown({code})")
-        pct = 100.0 * count / n_total
+        pct  = 100.0 * count / n_total
         print(f"    {name:20s}: {count:>10,} pts ({pct:5.1f}%)")
 
-    # ── 2. DBSCAN clustering ──────────────────────────────────────
+    # ── 2. Group by label (no clustering) ─────────────────────────
     print(f"\n{'='*60}")
-    print(f"  CLUSTERING  (eps={args.eps}, min_samples={args.min_samples})")
+    print(f"  LABEL GROUPING")
     print(f"{'='*60}")
 
-    features = cluster_features(points, classifications,
-                                eps=args.eps,
-                                min_samples=args.min_samples)
-
+    features = group_by_label(points, classifications)
     if not features:
-        print("\n  No feature clusters found. Try adjusting --eps or --min_samples.")
+        print("\n  No label groups found in point cloud.")
         return
 
-    print(f"\n  Total feature clusters: {len(features)}")
+    print(f"\n  Total label groups: {len(features)}")
 
-    # ── 3. Select target GML model (needed early for wall normals) ──
+    # ── 3. Select target GML model ─────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  SELECT TARGET GML MODEL")
     print(f"{'='*60}")
     gml_path = select_file(GML_DIR, "*.gml")
 
-    # Parse wall normals from the chosen GML
+    # Parse wall normals from GML
     print(f"\n  Parsing wall normals from {os.path.basename(gml_path)} ...")
     wall_normals = parse_wall_normals_from_gml(gml_path)
 
-    # ── 4. Wall-aligned bounding-box meshing ──────────────────────
+    # ── 4. Tessellation ───────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  MESHING  (Wall-aligned bounding box)")
+    print(f"  TESSELLATION  "
+          f"(n_slabs={args.n_slabs}, slab_thickness=±{args.slab_thickness} m)")
     print(f"{'='*60}")
 
     gml_fragments = []
-    summary = {}
+    summary       = {}
 
     for i, feat in enumerate(features):
-        # Semantic type: clusters from per-label DBSCAN already carry the
-        # right label ('window', 'door', or 'other'). For 'other' we always
-        # output BuildingInstallation regardless of filename inference.
-        ftype = feat['type']   # 'window' | 'door' | 'other'
+        ftype  = feat['type']
         if ftype not in ('window', 'door'):
-            ftype = 'other'    # normalise roof/wall/ground → 'other'
-        # NOTE: filename-inference override removed — per-label DBSCAN already
-        # assigns the authoritative type. 'other' → bldg:BuildingPart always.
+            ftype = 'other'
 
         n_pts  = feat['n_points']
-        print(f"\n  [{i+1}/{len(features)}] {ftype:12s}  {n_pts:>8,} pts  ", end="")
+        pts    = feat['points']
+        print(f"\n  [{i+1}/{len(features)}] {ftype:10s}  {n_pts:>8,} pts  ", end="")
 
-        # Find the best-matching wall normal for this cluster
-        wall_n = _best_wall_normal(feat['points'], wall_normals)
-        polygons = create_bbox_polygons(feat['points'], wall_normal=wall_n)
+        # ── Wall normal ──────────────────────────────────────────
+        wall_n = _best_wall_normal(pts, wall_normals)
+        if wall_n is None:
+            # Fallback: PCA-derived normal
+            xy   = pts[:, :2]
+            cxy  = xy - xy.mean(axis=0)
+            cov  = cxy.T @ cxy
+            _, evecs = np.linalg.eigh(cov)
+            tang = evecs[:, 1]
+            wall_n = np.array([-tang[1], tang[0], 0.0])
 
-        if not polygons:
-            print("→ BBox failed, skipped")
+        wall_n_unit = wall_n / np.linalg.norm(wall_n)
+
+        # ── Tessellate ───────────────────────────────────────────
+        # Each slab uses its own per-column mean depth, so the depth
+        # varies across slabs and follows the curved point-cloud profile.
+        prism_list = tessellate_curved_cluster(
+            pts,
+            wall_normal    = wall_n_unit,
+            n_slabs        = args.n_slabs,
+            slab_thickness = args.slab_thickness,
+            min_pts_slab   = args.min_pts_slab,
+        )
+
+        if not prism_list:
+            print("→ no slabs emitted, skipped")
             continue
 
-        n_verts = sum(len(p) - 1 for p in polygons)  # minus closing vertex
-        print(f"→ {len(polygons)} faces, {n_verts} vertices")
+        # Flatten all prism faces into one MultiSurface per feature
+        all_faces = [face for prism in prism_list for face in prism]
+        n_faces   = len(all_faces)
+        print(f"→ {len(prism_list)} slabs × 6 faces = {n_faces} polygons")
 
-        # ── Convert to CityGML ──────────────────────────────────
-        gml_id = f"{ftype}_{i+1}_{uuid.uuid4().hex[:8]}"
-        # 'other' → BuildingInstallation; window/door → opening
+        # ── Convert to CityGML ───────────────────────────────────
+        gml_id      = f"{ftype}_{i+1}_{uuid.uuid4().hex[:8]}"
         citygml_type = ftype if ftype in ("window", "door") else "installation"
-        fragment = feature_to_gml(citygml_type, gml_id, polygons)
+        fragment    = feature_to_gml(citygml_type, gml_id, all_faces)
         gml_fragments.append(fragment)
 
         summary[ftype] = summary.get(ftype, 0) + 1
 
     if not gml_fragments:
-        print("\n  No meshes created. Nothing to append.")
+        print("\n  No tessellated features created. "
+              "Try reducing --min_pts_slab or --n_slabs.")
         return
 
-    # Summary
+    # ── 5. Summary ───────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  FEATURE SUMMARY")
     print(f"{'='*60}")
     for ftype, count in sorted(summary.items()):
-        citygml = {"window": "bldg:Window", "door": "bldg:Door"}.get(
-            ftype, "bldg:BuildingInstallation")
+        citygml = {"window": "bldg:Window",
+                   "door":   "bldg:Door"}.get(ftype, "bldg:BuildingInstallation")
         print(f"    {ftype:12s} → {citygml:30s} × {count}")
     print(f"    {'Total':12s}   {' ':30s}   {len(gml_fragments)}")
 
-    # ── 5. Append and save ───────────────────────────────────────
+    # ── 6. Append and save ───────────────────────────────────────
     gml_basename = os.path.splitext(os.path.basename(gml_path))[0]
-    out_name = f"{gml_basename}_LOD3_test1.gml"
-    output_path = os.path.join(OUTPUT_DIR, out_name)
+    out_name     = f"{gml_basename}_LOD3_curved.gml"
+    output_path  = os.path.join(OUTPUT_DIR, out_name)
 
     print(f"\n  Appending {len(gml_fragments)} LOD3 features "
-          f"to {os.path.basename(gml_path)}...")
+          f"to {os.path.basename(gml_path)} ...")
 
     success = append_to_gml(gml_path, gml_fragments, output_path)
 

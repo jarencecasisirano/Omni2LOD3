@@ -8,7 +8,7 @@ Each cluster is assigned a distinct color in the output LAS file.
 Usage:
     conda activate lidar-test
     python scripts/LOD2toLOD3/06_segment_hsv_color.py \
-        --input outputs/07_merged_las/NIMBB-2-cleaned-super.las \
+        --input outputs/07_merged_las/NIMBB-2-super-cleaned.las \
         --output_dir outputs/08_segmented \
         --n_clusters 5
 
@@ -70,7 +70,7 @@ def rgb_to_hsv_array(rgb):
 # =====================================================================
 # Main segmentation pipeline
 # =====================================================================
-def segment_by_hsv(file_path, output_dir, n_clusters=5, hsv_weights=(2.0, 3.0, 0.3),
+def segment_by_hsv(file_path, output_dir, n_clusters=5, hsv_weights=(2.0, 2.0, 0.3),
                    use_minibatch=True, random_state=42):
     """
     Segment a point cloud by clustering HSV color values.

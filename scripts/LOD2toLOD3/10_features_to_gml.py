@@ -42,9 +42,9 @@ LABEL_MAP = {
 }
 LABEL_NAMES = {v: k for k, v in LABEL_MAP.items()}
 
-INPUT_DIR  = "outputs/10_facade_features"
+INPUT_DIR  = "outputs/12_manual_planes_extracted"
 GML_DIR    = "outputs/00_gml_wall_merged"
-OUTPUT_DIR = "outputs/final"
+OUTPUT_DIR = "outputs/trial"
 
 
 # =====================================================================
@@ -118,46 +118,66 @@ def cluster_features(points, labels, eps, min_samples):
     return features
 
 
-# =====================================================================
-# Convex hull mesh via PCA plane projection (no Open3D — no segfaults)
-# =====================================================================
-def create_mesh(points):
+def create_bbox_polygons(points):
     """
-    Create a convex hull polygon from a point cluster.
+    Create a 3D Oriented Bounding Box (OBB) from a point cluster.
+    Uses PCA to find the principal axes.
 
-    Projects points onto their best-fit plane (PCA), computes
-    a 2D convex hull with scipy, and maps back to 3D.
-
-    Returns a list containing one closed polygon
-    (list of (x,y,z) tuples with first == last for GML).
+    Returns a list of 6 closed polygons (faces of the box).
     """
     if len(points) < 3:
         return []
 
+    # 1. PCA to find principal axes
     centroid = points.mean(axis=0)
     centered = points - centroid
+    cov = np.cov(centered, rowvar=False)
+    eig_vals, eig_vecs = np.linalg.eigh(cov)
+    
+    # Sort eigenvalues in descending order and flip eigenvectors
+    idx = eig_vals.argsort()[::-1]
+    eig_vals = eig_vals[idx]
+    eig_vecs = eig_vecs[:, idx]
 
-    # PCA: eigenvectors of covariance, sorted ascending by eigenvalue.
-    # The two LARGEST eigenvectors span the best-fit plane.
-    cov = np.cov(centered.T)
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
-    basis = eigenvectors[:, 1:]          # last 2 columns = plane basis
+    # 2. Project points onto PCA axes to find extents
+    projected = centered @ eig_vecs
+    p_min = projected.min(axis=0)
+    p_max = projected.max(axis=0)
 
-    # Project to 2D
-    pts_2d = centered @ basis
+    # 3. Define 8 box vertices in projected space
+    # (x_min, y_min, z_min), (x_max, y_min, z_min), etc.
+    v_proj = np.array([
+        [p_min[0], p_min[1], p_min[2]], # 0
+        [p_max[0], p_min[1], p_min[2]], # 1
+        [p_max[0], p_max[1], p_min[2]], # 2
+        [p_min[0], p_max[1], p_min[2]], # 3
+        [p_min[0], p_min[1], p_max[2]], # 4
+        [p_max[0], p_min[1], p_max[2]], # 5
+        [p_max[0], p_max[1], p_max[2]], # 6
+        [p_min[0], p_max[1], p_max[2]], # 7
+    ])
 
-    try:
-        hull = ConvexHull(pts_2d)
-    except Exception:
-        return []
+    # 4. Transform vertices back to world space
+    v_world = (v_proj @ eig_vecs.T) + centroid
 
-    # hull.vertices are in CCW order for 2D
-    hull_3d = points[hull.vertices]
+    # 5. Define 6 faces (indices into v_world)
+    # Bottom, Top, Front, Back, Left, Right
+    face_indices = [
+        [0, 1, 2, 3], # Bottom (min Z in local space)
+        [4, 5, 6, 7], # Top (max Z)
+        [0, 1, 5, 4], # Front
+        [1, 2, 6, 5], # Right
+        [2, 3, 7, 6], # Back
+        [3, 0, 4, 7], # Left
+    ]
 
-    poly = [tuple(p) for p in hull_3d]
-    poly.append(poly[0])               # close ring
+    polygons = []
+    for indices in face_indices:
+        poly = [tuple(v_world[idx]) for idx in indices]
+        poly.append(poly[0]) # Close ring
+        polygons.append(poly)
 
-    return [poly]
+    return polygons
 
 
 # =====================================================================
@@ -278,7 +298,16 @@ def main():
 
     # ── 1. Select point cloud ──────────────────────────────────────
     las_path = select_file(INPUT_DIR, "*.las")
+    las_fname = os.path.basename(las_path).lower()
     print(f"\n  Loading: {os.path.basename(las_path)}")
+
+    # Infer default feature type from filename
+    inferred_type = "other"
+    if "window" in las_fname:
+        inferred_type = "window"
+    elif "door" in las_fname:
+        inferred_type = "door"
+    print(f"  Inferred feature type: {inferred_type}")
 
     las = laspy.read(las_path)
     points = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
@@ -318,18 +347,22 @@ def main():
     summary = {}
 
     for i, feat in enumerate(features):
-        ftype  = feat['type']
+        # Prefer filename-based type if majority is 'other' or 'wall'
+        ftype = feat['type']
+        if ftype in ("other", "wall") and inferred_type != "other":
+            ftype = inferred_type
+        
         n_pts  = feat['n_points']
         print(f"\n  [{i+1}/{len(features)}] {ftype:12s}  {n_pts:>8,} pts  ", end="")
 
-        polygons = create_mesh(feat['points'])
+        polygons = create_bbox_polygons(feat['points'])
 
         if not polygons:
-            print("→ mesh failed, skipped")
+            print("→ BBox failed, skipped")
             continue
 
         n_verts = sum(len(p) - 1 for p in polygons)  # minus closing vertex
-        print(f"→ {len(polygons)} polygon(s), {n_verts} vertices")
+        print(f"→ {len(polygons)} faces, {n_verts} vertices")
 
         # ── 4. Convert to CityGML ────────────────────────────────
         gml_id = f"{ftype}_{i+1}_{uuid.uuid4().hex[:8]}"

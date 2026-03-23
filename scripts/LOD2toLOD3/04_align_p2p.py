@@ -9,7 +9,8 @@ computing the optimal rigid-body + uniform-scale transform (Umeyama algorithm).
 Workflow
 --------
 1. GUI dialogs: select subfolder → select .las file → select .gml file.
-2. GML viewer: click vertices on the 3-D model; they are numbered 1, 2, 3 …
+2. GML viewer: click anywhere on an edge (or a vertex) on the 3-D model;
+   picks are numbered 1, 2, 3 …
 3. Point cloud viewer: click the matching points (same numbering).
 4. Umeyama SVD transform is computed and applied to the full cloud.
 5. Output is written to  outputs/06_aligned_p2p/<subfolder>/<filename>.las
@@ -44,7 +45,7 @@ try:
     import matplotlib
     matplotlib.use("TkAgg")          # interactive backend
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D          # noqa: F401 (registers projection)
+    from mpl_toolkits.mplot3d import Axes3D, proj3d   # noqa: F401 (registers projection)
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     from matplotlib.widgets import Button
 except ImportError:
@@ -311,6 +312,9 @@ class PointPicker3D:
     label_prefix  : e.g. "GML" or "Cloud" — used in pick annotations.
     reference_picks: list of 3-D points already chosen in the *other* viewer
                      (shown as faded stars for context).
+    edge_picking  : if True (GML viewer), left-clicks snap to the nearest
+                    point along any polygon edge — not just scatter vertices.
+    edge_pick_tol : screen-space pixel tolerance for edge picking.
     """
 
     def __init__(self,
@@ -320,19 +324,30 @@ class PointPicker3D:
                  max_picks: int = 0,
                  label_prefix: str = "P",
                  reference_picks: Optional[List[np.ndarray]] = None,
-                 polygons: Optional[List[np.ndarray]] = None):
+                 polygons: Optional[List[np.ndarray]] = None,
+                 edge_picking: bool = False,
+                 edge_pick_tol: float = 12.0):
 
-        self.pts         = display_pts
-        self.colors      = display_colors
-        self.title       = title
-        self.max_picks   = max_picks
+        self.pts          = display_pts
+        self.colors       = display_colors
+        self.title        = title
+        self.max_picks    = max_picks
         self.label_prefix = label_prefix
-        self.ref_picks   = reference_picks or []
-        self.polygons    = polygons or []
+        self.ref_picks    = reference_picks or []
+        self.polygons     = polygons or []
+        self.edge_picking = edge_picking
+        self.edge_pick_tol = edge_pick_tol
 
         self.picked_pts: List[np.ndarray] = []     # world-space 3-D points
-        self.picked_idx: List[int]         = []     # indices into self.pts
+        self.picked_idx: List[int]         = []     # indices into self.pts (scatter mode)
         self._confirmed  = False
+
+        # Pre-build edge segment list from polygons for fast picking
+        self._edge_segments: List[Tuple[np.ndarray, np.ndarray]] = []
+        for poly in self.polygons:
+            verts = poly[:-1] if len(poly) > 1 and np.allclose(poly[0], poly[-1]) else poly
+            for i in range(len(verts)):
+                self._edge_segments.append((verts[i], verts[(i + 1) % len(verts)]))
 
         self._build_figure()
 
@@ -419,12 +434,13 @@ class PointPicker3D:
 
         # Connect events
         self.fig.canvas.mpl_connect("pick_event",        self._on_pick)
-        self.fig.canvas.mpl_connect("button_press_event", self._on_rclick)
+        self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event",    self._on_key)
         self.fig.canvas.mpl_connect("close_event",        self._on_close)
 
         # Holds annotation handles for pick labels  (list of (scatter, text))
         self._pick_artists: List = []
+        self._edge_pick_pending = False   # guard to avoid double-registering
 
         self._update_title()
 
@@ -462,7 +478,9 @@ class PointPicker3D:
 
     # ------------------------------------------------------------------- events
     def _on_pick(self, event):
-        """Left-click pick — add the nearest shown point."""
+        """Scatter pick_event — used in cloud (non-edge) mode only."""
+        if self.edge_picking:
+            return   # edge mode handles its own left-click via _on_click
         if event.mouseevent.button != 1:
             return
         if self.max_picks and len(self.picked_pts) >= self.max_picks:
@@ -471,9 +489,84 @@ class PointPicker3D:
 
         ind = event.ind[0]   # index into self.pts
         pt  = self.pts[ind]
+        self._register_pick(pt)
 
+    def _on_click(self, event):
+        """Unified mouse-button handler.
+
+        Right-click  → undo last pick (both modes).
+        Left-click   → edge-pick in GML mode; ignored in cloud mode
+                       (cloud mode uses pick_event from the scatter).
+        """
+        if event.button == 3:
+            self._undo()
+            return
+
+        if event.button != 1 or not self.edge_picking:
+            return
+        if event.inaxes is not self.ax:
+            return
+        if self.max_picks and len(self.picked_pts) >= self.max_picks:
+            print(f"  Maximum {self.max_picks} picks reached.")
+            return
+
+        # Project all edge segments to screen space and find closest
+        pt3d = self._closest_edge_point(event.x, event.y)
+        if pt3d is None:
+            return   # click was too far from any edge
+        self._register_pick(pt3d)
+
+    # --------------------------------------------------------- edge projection
+    def _closest_edge_point(self, xd: float, yd: float) -> Optional[np.ndarray]:
+        """
+        Given a display-space click (xd, yd), find the 3-D point on the
+        nearest polygon edge that is closest to the click in screen space.
+
+        Returns the 3-D point (world coords) or None if no edge is within
+        self.edge_pick_tol pixels.
+        """
+        if not self._edge_segments:
+            return None
+
+        # Get the current projection matrix
+        M = self.ax.get_proj()
+
+        best_dist  = float("inf")
+        best_pt3d  = None
+
+        for p0, p1 in self._edge_segments:
+            # Project endpoints to display (pixel) coordinates
+            x0s, y0s, _ = proj3d.proj_transform(p0[0], p0[1], p0[2], M)
+            x1s, y1s, _ = proj3d.proj_transform(p1[0], p1[1], p1[2], M)
+            # Convert from axes-normalised [-1,1] to display pixels
+            x0d, y0d = self.ax.transData.transform((x0s, y0s))
+            x1d, y1d = self.ax.transData.transform((x1s, y1s))
+
+            # Parametric closest-point-on-segment
+            dx, dy = x1d - x0d, y1d - y0d
+            seg_len2 = dx * dx + dy * dy
+            if seg_len2 == 0:
+                t = 0.0
+            else:
+                t = ((xd - x0d) * dx + (yd - y0d) * dy) / seg_len2
+                t = max(0.0, min(1.0, t))
+
+            cx = x0d + t * dx
+            cy = y0d + t * dy
+            dist = ((xd - cx) ** 2 + (yd - cy) ** 2) ** 0.5
+
+            if dist < best_dist:
+                best_dist = dist
+                best_pt3d = p0 + t * (p1 - p0)   # interpolated 3-D point
+
+        if best_dist <= self.edge_pick_tol:
+            return best_pt3d
+        return None
+
+    # ---------------------------------------------------------- shared register
+    def _register_pick(self, pt: np.ndarray):
+        """Append a 3-D pick, draw its marker and label."""
         self.picked_pts.append(pt.copy())
-        self.picked_idx.append(ind)
 
         n   = len(self.picked_pts)
         col = _PICK_COLORS[(n - 1) % len(_PICK_COLORS)]
@@ -490,11 +583,6 @@ class PointPicker3D:
         print(f"  Pick {n}: {self.label_prefix}{n} = ({pt[0]:.3f}, {pt[1]:.3f}, {pt[2]:.3f})")
         self._update_title()
         self.fig.canvas.draw_idle()
-
-    def _on_rclick(self, event):
-        """Right-click → undo last pick."""
-        if event.button == 3:
-            self._undo()
 
     def _on_key(self, event):
         if event.key in ("d", "D"):
@@ -529,7 +617,8 @@ class PointPicker3D:
         if not self.picked_pts:
             return
         self.picked_pts.pop()
-        self.picked_idx.pop()
+        if self.picked_idx:
+            self.picked_idx.pop()   # only populated in scatter mode
         sc, tx = self._pick_artists.pop()
         sc.remove()
         tx.remove()
@@ -699,10 +788,11 @@ def main():
     gml_picker = PointPicker3D(
         display_pts    = gml_display,
         display_colors = None,
-        title          = f"GML Model — {gml_path.name}  |  Click vertices to pick",
+        title          = f"GML Model — {gml_path.name}  |  Click anywhere on an edge to pick",
         max_picks      = 0,
         label_prefix   = "G",
         polygons       = gml_polys,
+        edge_picking   = True,
     )
     gml_picks = gml_picker.run()
 

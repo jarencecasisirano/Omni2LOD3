@@ -43,9 +43,9 @@ LABEL_MAP = {
 }
 LABEL_NAMES = {v: k for k, v in LABEL_MAP.items()}
 
-INPUT_DIR  = "outputs/trials"
-GML_DIR    = "outputs/trials"
-OUTPUT_DIR = "outputs/trials"
+INPUT_DIR  = "outputs/12_facade_curve"
+GML_DIR    = "data/lod_2"
+OUTPUT_DIR = "outputs/13_facade_curve_tesselated"
 
 
 # =====================================================================
@@ -117,31 +117,43 @@ def group_by_label(points, labels):
 
 
 # =====================================================================
-# Parse wall normals from a LOD2 GML file
+# Wall-surface parsing and intersection-based normal selection
 # =====================================================================
-def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
+def parse_wall_surfaces_from_gml(gml_path):
     """
-    Extract horizontal (XY-plane) unit normals from every WallSurface polygon
-    found inside a CityGML file, then cluster near-parallel normals and return
-    only the *dominant* direction for each cluster.
+    Parse every WallSurface exterior polygon from a CityGML file.
 
-    Returns a list of dominant 2-D unit vectors.
+    For each polygon the following dict is returned::
+
+        {
+          'coords':    ndarray(N, 3),   # raw ring vertices
+          'normal_2d': ndarray(2,),     # horizontal unit normal (XY)
+          'origin_2d': ndarray(2,),     # ring centroid projected to XY
+          'z_min':     float,
+          'z_max':     float,
+          'xy_min':    ndarray(2,),     # AABB corners in XY
+          'xy_max':    ndarray(2,),
+        }
+
+    Returns a list of such dicts (one per polygon found).
     """
     try:
         tree = ET.parse(gml_path)
         root = tree.getroot()
     except ET.ParseError as e:
-        print(f"  WARNING: could not parse GML for wall normals: {e}")
+        print(f"  WARNING: could not parse GML: {e}")
         return []
 
-    raw_normals = []
+    ns_bldg = 'http://www.opengis.net/citygml/building/2.0'
+    ns_gml  = 'http://www.opengis.net/gml'
 
-    for ws in root.iter('{http://www.opengis.net/citygml/building/2.0}WallSurface'):
-        for poly in ws.iter('{http://www.opengis.net/gml}Polygon'):
-            exterior = poly.find('.//{http://www.opengis.net/gml}exterior')
+    surfaces = []
+    for ws in root.iter(f'{{{ns_bldg}}}WallSurface'):
+        for poly in ws.iter(f'{{{ns_gml}}}Polygon'):
+            exterior = poly.find(f'.//{{{ns_gml}}}exterior')
             if exterior is None:
                 continue
-            pos_el = exterior.find('.//{http://www.opengis.net/gml}posList')
+            pos_el = exterior.find(f'.//{{{ns_gml}}}posList')
             if pos_el is None or not pos_el.text:
                 continue
 
@@ -149,124 +161,200 @@ def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
             if len(vals) < 9:
                 continue
 
-            pts = np.array(vals).reshape(-1, 3)
-            if len(pts) < 3:
+            coords = np.array(vals, dtype=np.float64).reshape(-1, 3)
+            if len(coords) < 3:
                 continue
 
-            # Newell's method for polygon normal
+            # Newell's method → polygon normal
             n = np.zeros(3)
-            for i in range(len(pts)):
-                curr = pts[i]
-                nxt  = pts[(i + 1) % len(pts)]
+            for i in range(len(coords)):
+                curr = coords[i]
+                nxt  = coords[(i + 1) % len(coords)]
                 n[0] += (curr[1] - nxt[1]) * (curr[2] + nxt[2])
                 n[1] += (curr[2] - nxt[2]) * (curr[0] + nxt[0])
                 n[2] += (curr[0] - nxt[0]) * (curr[1] + nxt[1])
 
-            nh = n[:2]
+            nh  = n[:2]
             mag = np.linalg.norm(nh)
             if mag < 1e-6:
-                continue
-            raw_normals.append(nh / mag)
+                continue   # horizontal slab — skip
 
-    if not raw_normals:
-        print("  WARNING: no wall normals found in GML.")
-        return []
+            normal_2d = nh / mag
+            centroid  = coords.mean(axis=0)
 
-    # ── Cluster near-parallel normals ──────────────────────────────
-    tol_cos = np.cos(np.radians(angle_tol_deg))
-    dominant = []
-    raw_normals_arr = np.array(raw_normals)
+            surfaces.append({
+                'coords':    coords,
+                'normal_2d': normal_2d,
+                'origin_2d': centroid[:2].copy(),
+                'z_min':     float(coords[:, 2].min()),
+                'z_max':     float(coords[:, 2].max()),
+                'xy_min':    coords[:, :2].min(axis=0),
+                'xy_max':    coords[:, :2].max(axis=0),
+            })
 
-    for nv in raw_normals_arr:
-        matched = False
-        for idx, (rep, cnt) in enumerate(dominant):
-            if abs(float(np.dot(nv, rep))) >= tol_cos:
-                new_rep = rep * cnt + nv * np.sign(float(np.dot(nv, rep)))
-                nr = np.linalg.norm(new_rep)
-                dominant[idx] = (new_rep / nr if nr > 1e-9 else rep, cnt + 1)
-                matched = True
-                break
-        if not matched:
-            dominant.append((nv, 1))
-
-    dominant.sort(key=lambda x: x[1], reverse=True)
-    dominant_normals = [d[0] for d in dominant]
-
-    print(f"  Extracted {len(raw_normals)} raw wall normals "
-          f"→ {len(dominant_normals)} dominant directions from GML.")
-    for i, (nv, cnt) in enumerate(dominant):
-        angle = np.degrees(np.arctan2(nv[1], nv[0]))
-        print(f"    [{i+1}] angle={angle:+.1f}°  count={cnt}")
-    return dominant_normals
+    print(f"  Parsed {len(surfaces)} WallSurface polygon(s) from GML.")
+    if not surfaces:
+        print("  WARNING: no WallSurface polygons found.")
+    return surfaces
 
 
-def _best_wall_normal(points, wall_normals):
+def find_wall_normal_for_cluster(points, wall_surfaces,
+                                 dist_tol=2.0, z_expand=0.5):
     """
-    Given a point cluster and a list of candidate 2-D horizontal wall normals,
-    return the wall normal (as a 3-D vector with Z=0) whose tangent direction
-    best aligns with the cluster's dominant horizontal spread axis.
+    Return the exact 2-D horizontal unit normal (as a 3-D vector with Z = 0)
+    of the best-matching WallSurface for *points*, using two stages:
+
+    Stage 1 — Spatial intersection (requires coordinate systems to match):
+      Checks Z overlap, signed centroid-to-plane distance < dist_tol, and
+      XY footprint. Picks the wall with the smallest |distance|.
+
+    Stage 2 — Normal alignment (coordinate-independent fallback):
+      Estimates the cluster's wall normal via PCA, then picks the
+      WallSurface whose exact normal best aligns with that estimate.
+      This always returns an exact LOD2 surface normal, never a PCA guess.
+
+    Stage 3 — Pure PCA (only when no wall surfaces exist at all).
     """
-    if not wall_normals:
+    if not wall_surfaces:
+        print("[PCA – no wall surfaces]", end=" ")
+        return _pca_wall_normal(points)
+
+    cl_z_min  = float(points[:, 2].min())
+    cl_z_max  = float(points[:, 2].max())
+    centroid  = points.mean(axis=0)
+    cxy       = centroid[:2]
+
+    # ── Stage 1: spatial intersection ───────────────────────────────
+    best_normal = None
+    best_dist   = float('inf')
+
+    for ws in wall_surfaces:
+        if cl_z_max < ws['z_min'] - z_expand or cl_z_min > ws['z_max'] + z_expand:
+            continue
+        n2d = ws['normal_2d']
+        d   = float(np.dot(cxy - ws['origin_2d'], n2d))
+        if abs(d) >= dist_tol:
+            continue
+        proj_xy = cxy - d * n2d
+        pad = dist_tol
+        if (proj_xy[0] < ws['xy_min'][0] - pad or
+                proj_xy[0] > ws['xy_max'][0] + pad or
+                proj_xy[1] < ws['xy_min'][1] - pad or
+                proj_xy[1] > ws['xy_max'][1] + pad):
+            continue
+        if abs(d) < best_dist:
+            best_dist   = abs(d)
+            best_normal = n2d
+
+    if best_normal is not None:
+        angle = np.degrees(np.arctan2(best_normal[1], best_normal[0]))
+        print(f"[Stage1: dist={best_dist:.2f} m, angle={angle:+.1f}°]", end=" ")
+        return np.array([best_normal[0], best_normal[1], 0.0])
+
+    # ── Stage 2: alignment with exact per-surface normals ────────────
+    # Estimate cluster's wall-normal direction via PCA (coordinate-free).
+    # Then pick the WallSurface whose exact normal best aligns with it.
+    pca_n = _pca_normal_2d(points)
+    if pca_n is not None:
+        best_dot    = -1.0
+        align_normal = None
+        for ws in wall_surfaces:
+            dot = abs(float(np.dot(pca_n, ws['normal_2d'])))
+            if dot > best_dot:
+                best_dot     = dot
+                align_normal = ws['normal_2d']
+        if align_normal is not None:
+            angle = np.degrees(np.arctan2(align_normal[1], align_normal[0]))
+            print(f"[Stage2: align={best_dot:.3f}, angle={angle:+.1f}°]", end=" ")
+            return np.array([align_normal[0], align_normal[1], 0.0])
+
+    # ── Stage 3: pure PCA fallback ───────────────────────────────────
+    print("[Stage3: PCA fallback]", end=" ")
+    return _pca_wall_normal(points)
+
+
+def _pca_normal_2d(points):
+    """
+    Return the PCA-estimated wall normal as a 2-D unit vector, or None.
+    Used by Stage 2 of find_wall_normal_for_cluster for dot-product matching.
+    """
+    if len(points) < 3:
         return None
-
-    xy = points[:, :2]
+    xy  = points[:, :2]
     cxy = xy - xy.mean(axis=0)
     cov = cxy.T @ cxy
-    eig_vals, eig_vecs = np.linalg.eigh(cov)
-    tangent_2d = eig_vecs[:, 1]   # largest eigenvalue → wall tangent
+    _, eig_vecs = np.linalg.eigh(cov)
+    tang = eig_vecs[:, 1]
+    return np.array([-tang[1], tang[0]])
 
-    cluster_normal_2d = np.array([-tangent_2d[1], tangent_2d[0]])
 
-    best_n   = None
-    best_dot = -1.0
-    for wn in wall_normals:
-        dot = abs(float(np.dot(cluster_normal_2d, wn)))
-        if dot > best_dot:
-            best_dot = dot
-            best_n   = wn
-
-    if best_n is None:
+def _pca_wall_normal(points):
+    """
+    Estimate the wall normal from the cluster's dominant horizontal spread
+    (PCA in XY).  Returns a 3-D vector with Z = 0, or None if degenerate.
+    """
+    n2d = _pca_normal_2d(points)
+    if n2d is None:
         return None
+    return np.array([n2d[0], n2d[1], 0.0])
 
-    return np.array([best_n[0], best_n[1], 0.0])
 
+# =====================================================================
+# Split points by closest WallSurface (pure geometry, no PCA)
+# =====================================================================
+def split_by_wall(points, wall_surfaces):
+    """
+    Assign every point in *points* to the closest WallSurface using the
+    signed distance of each point's XY projection to each wall plane.
 
+    Returns a list of dicts, one per wall that received ≥1 point::
+
+        {
+          'wall':              the wall_surfaces dict entry,
+          'points':            ndarray(M, 3),
+          'wall_origin_depth': float  — dot(wall_origin_xy, wall_n2d),
+                               i.e. the depth of the wall plane in the
+                               wall-normal projection frame.
+        }
+    """
+    if not wall_surfaces:
+        return []
+
+    pts_xy   = points[:, :2]          # (N, 2)
+    n_walls  = len(wall_surfaces)
+
+    # Build (N, n_walls) signed-distance matrix in pure numpy
+    dist_matrix = np.empty((len(points), n_walls), dtype=np.float64)
+    for j, ws in enumerate(wall_surfaces):
+        dist_matrix[:, j] = (pts_xy - ws['origin_2d']) @ ws['normal_2d']
+
+    # Each point → wall with minimum |signed distance|
+    assignments = np.argmin(np.abs(dist_matrix), axis=1)   # (N,)
+
+    sub_clusters = []
+    for j, ws in enumerate(wall_surfaces):
+        mask = assignments == j
+        if not mask.any():
+            continue
+        sub_pts = points[mask]
+        # Wall-plane depth = dot(origin_2d, normal_2d)
+        # Any point ON the wall plane satisfies dot(p_xy, n2d) == this value.
+        wall_origin_depth = float(np.dot(ws['origin_2d'], ws['normal_2d']))
+        sub_clusters.append({
+            'wall':              ws,
+            'points':            sub_pts,
+            'wall_origin_depth': wall_origin_depth,
+        })
+
+    return sub_clusters
 
 
 # =====================================================================
 # Tessellation — curved cluster → staircase of rectangular prisms
 # =====================================================================
 def tessellate_curved_cluster(points, wall_normal, n_slabs,
-                              slab_thickness, min_pts_slab):
-    """
-    Discretise a point group into a staircase of axis-aligned rectangular
-    prisms, each snapped to the wall normal direction.
-
-    Coordinate frame
-    ----------------
-      axis0 = wall_normal   (depth direction, into/out-of wall)
-      axis1 = tangent        (along wall, horizontal)
-      axis2 = world Z        (vertical)
-
-    Algorithm
-    ---------
-    1. Project all points onto (depth, tangent, height) local frame.
-    2. Divide the tangent range into n_slabs equal columns.
-    3. For each column:
-         a. Collect points in [t_lo, t_hi].
-         b. depth_mid = mean depth of the points in THAT column.
-            This varies per slab, creating the curved/staircase profile.
-         c. depth_lo = depth_mid - slab_thickness
-            depth_hi = depth_mid + slab_thickness
-         d. z range = [z_min, z_max] of those points.
-         e. Emit 6-face prism from (depth_lo, t_lo, z_lo) to
-                                    (depth_hi, t_hi, z_hi).
-
-    Returns
-    -------
-    list of prism_face_lists.
-      Each entry is a list of 6 closed quad polygons (list of 5 tuples).
-    """
+                              slab_thickness, min_pts_slab,
+                              wall_depth=None, wall_coords=None):
     if len(points) < min_pts_slab:
         return []
 
@@ -274,7 +362,7 @@ def tessellate_curved_cluster(points, wall_normal, n_slabs,
     wn = np.asarray(wall_normal, dtype=np.float64)
     wn = wn / np.linalg.norm(wn)
 
-    z_up   = np.array([0.0, 0.0, 1.0])
+    z_up    = np.array([0.0, 0.0, 1.0])
     tangent = np.cross(z_up, wn)
     t_norm  = np.linalg.norm(tangent)
     if t_norm < 1e-9:
@@ -282,25 +370,24 @@ def tessellate_curved_cluster(points, wall_normal, n_slabs,
     else:
         tangent = tangent / t_norm
 
-    # axes columns: [wn, tangent, z_up]
     axes = np.column_stack([wn, tangent, z_up])   # (3, 3)
+    projected = points @ axes                     # (N, 3)
 
-    # Project points
-    projected = points @ axes        # (N, 3) in (depth, tang, height)
+    # 1. Base bounds purely on the points
+    pt_t_min = projected[:, 1].min()
+    pt_t_max = projected[:, 1].max()
 
-    t_min = projected[:, 1].min()
-    t_max = projected[:, 1].max()
-    if t_max - t_min < 1e-6:
+    if pt_t_max - pt_t_min < 1e-6:
         return []
 
-    delta = (t_max - t_min) / n_slabs
-
+    delta = (pt_t_max - pt_t_min) / n_slabs
     prism_list = []
+
     for i in range(n_slabs):
-        t_lo = t_min + i * delta
+        t_lo = pt_t_min + i * delta
         t_hi = t_lo + delta
 
-        # Points in this slab column (inclusive at boundaries)
+        # 2. Evaluate data using UNCLAMPED bounds (prevents deletion)
         if i < n_slabs - 1:
             mask = (projected[:, 1] >= t_lo) & (projected[:, 1] < t_hi)
         else:
@@ -310,48 +397,85 @@ def tessellate_curved_cluster(points, wall_normal, n_slabs,
         if len(col_pts) < min_pts_slab:
             continue
 
-        # Depth: use this column's own mean depth so each slab sits at its
-        # actual position along the wall normal — this is what produces the
-        # curved / staircase profile.
-        depth_center = float(col_pts[:, 0].mean())
-        depth_lo = depth_center - slab_thickness
-        depth_hi = depth_center + slab_thickness
-
         z_lo = float(col_pts[:, 2].min())
         z_hi = float(col_pts[:, 2].max())
 
         if z_hi - z_lo < 1e-4:
-            continue    # degenerate slab, skip
+            continue
 
-        # 8 corners in local frame (depth, tang, height)
+        if wall_depth is not None:
+            depth_center = wall_depth
+        else:
+            depth_center = float(col_pts[:, 0].mean())
+
+        depth_lo = depth_center - slab_thickness
+        depth_hi = depth_center + slab_thickness
+
+        # 3. GEOMETRY CLAMPING: Restrict physical box to the LOD2 Wall
+        box_t_lo = t_lo
+        box_t_hi = t_hi
+
+        if wall_coords is not None:
+            proj_wall = wall_coords @ axes
+            wall_t_min = proj_wall[:, 1].min()
+            wall_t_max = proj_wall[:, 1].max()
+
+            # NO MARGIN: Allow bounding boxes to span exactly to the LOD2 wall joints.
+            # This ensures continuous windows with no gaps, and prevents narrow 
+            # wall segments from being mathematically swallowed/deleted.
+            safe_min = wall_t_min
+            safe_max = wall_t_max
+
+            # Failsafe for extremely narrow LOD2 wall segments
+            if safe_max <= safe_min:
+                mid = (wall_t_min + wall_t_max) / 2.0
+                safe_min = mid - 0.01
+                safe_max = mid + 0.01
+
+            # Clamp lateral width exactly to the wall boundaries
+            box_t_lo = max(box_t_lo, safe_min)
+            box_t_hi = min(box_t_hi, safe_max)
+
+            # Failsafe to ensure positive width if points heavily overhung the corner
+            if box_t_hi <= box_t_lo:
+                 center = (box_t_lo + box_t_hi) / 2.0
+                 box_t_lo = center - 0.05
+                 box_t_hi = center + 0.05
+
+            # Clamp lateral width
+            box_t_lo = max(box_t_lo, safe_min)
+            box_t_hi = min(box_t_hi, safe_max)
+
+            # Failsafe to ensure positive width if points heavily overhung
+            if box_t_hi <= box_t_lo:
+                 center = (box_t_lo + box_t_hi) / 2.0
+                 box_t_lo = center - 0.05
+                 box_t_hi = center + 0.05
+
+        # 4. Draw corners using the CLAMPED lateral bounds
         corners_local = np.array([
-            [depth_lo, t_lo, z_lo],   # 0
-            [depth_hi, t_lo, z_lo],   # 1
-            [depth_hi, t_hi, z_lo],   # 2
-            [depth_lo, t_hi, z_lo],   # 3
-            [depth_lo, t_lo, z_hi],   # 4
-            [depth_hi, t_lo, z_hi],   # 5
-            [depth_hi, t_hi, z_hi],   # 6
-            [depth_lo, t_hi, z_hi],   # 7
+            [depth_lo, box_t_lo, z_lo],   # 0
+            [depth_hi, box_t_lo, z_lo],   # 1
+            [depth_hi, box_t_hi, z_lo],   # 2
+            [depth_lo, box_t_hi, z_lo],   # 3
+            [depth_lo, box_t_lo, z_hi],   # 4
+            [depth_hi, box_t_lo, z_hi],   # 5
+            [depth_hi, box_t_hi, z_hi],   # 6
+            [depth_lo, box_t_hi, z_hi],   # 7
         ])
 
-        # Back to world space:  world = local @ axes.T
         corners_world = corners_local @ axes.T   # (8, 3)
 
-        # 6 faces (quad, CCW when viewed from outside)
         face_indices = [
-            [0, 3, 2, 1],   # Bottom  (z_lo)
-            [4, 5, 6, 7],   # Top     (z_hi)
-            [0, 1, 5, 4],   # Front   (t_lo face)
-            [3, 7, 6, 2],   # Back    (t_hi face)
-            [0, 4, 7, 3],   # Left    (depth_lo, wall-parallel)
-            [1, 2, 6, 5],   # Right   (depth_hi, wall-parallel)
+            [0, 3, 2, 1], [4, 5, 6, 7], 
+            [0, 1, 5, 4], [3, 7, 6, 2], 
+            [0, 4, 7, 3], [1, 2, 6, 5],
         ]
 
         faces = []
         for fi in face_indices:
             ring = [tuple(corners_world[k]) for k in fi]
-            ring.append(ring[0])    # close ring
+            ring.append(ring[0])
             faces.append(ring)
 
         prism_list.append(faces)
@@ -519,9 +643,9 @@ def main():
     print(f"{'='*60}")
     gml_path = select_file(GML_DIR, "*.gml")
 
-    # Parse wall normals from GML
-    print(f"\n  Parsing wall normals from {os.path.basename(gml_path)} ...")
-    wall_normals = parse_wall_normals_from_gml(gml_path)
+    # Parse WallSurface geometry for intersection-based normal selection
+    print(f"\n  Parsing WallSurfaces from {os.path.basename(gml_path)} ...")
+    wall_surfaces = parse_wall_surfaces_from_gml(gml_path)
 
     # ── 4. Tessellation ───────────────────────────────────────────
     print(f"\n{'='*60}")
@@ -537,50 +661,71 @@ def main():
         if ftype not in ('window', 'door'):
             ftype = 'other'
 
-        n_pts  = feat['n_points']
-        pts    = feat['points']
-        print(f"\n  [{i+1}/{len(features)}] {ftype:10s}  {n_pts:>8,} pts  ", end="")
+        n_pts = feat['n_points']
+        pts   = feat['points']
+        print(f"\n  [{i+1}/{len(features)}] {ftype:10s}  {n_pts:>8,} pts")
 
-        # ── Wall normal ──────────────────────────────────────────
-        wall_n = _best_wall_normal(pts, wall_normals)
-        if wall_n is None:
-            # Fallback: PCA-derived normal
-            xy   = pts[:, :2]
-            cxy  = xy - xy.mean(axis=0)
-            cov  = cxy.T @ cxy
-            _, evecs = np.linalg.eigh(cov)
-            tang = evecs[:, 1]
-            wall_n = np.array([-tang[1], tang[0], 0.0])
+        # ── Split label group by WallSurface ────────────────────────────
+        if wall_surfaces:
+            sub_clusters = split_by_wall(pts, wall_surfaces)
+            print(f"    → split into {len(sub_clusters)} wall sub-cluster(s)")
+        else:
+            # No GML surfaces: treat whole group as one cluster with PCA normal
+            wall_n = _pca_wall_normal(pts)
+            if wall_n is None:
+                print("    → no wall surfaces and PCA failed, skipped")
+                continue
+            sub_clusters = [{
+                'wall':              None,
+                'points':            pts,
+                'wall_origin_depth': None,
+            }]
 
-        wall_n_unit = wall_n / np.linalg.norm(wall_n)
+        for sc_idx, sc in enumerate(sub_clusters):
+            sc_pts = sc['points']
+            wall_depth = sc['wall_origin_depth']   # exact wall-plane depth
 
-        # ── Tessellate ───────────────────────────────────────────
-        # Each slab uses its own per-column mean depth, so the depth
-        # varies across slabs and follows the curved point-cloud profile.
-        prism_list = tessellate_curved_cluster(
-            pts,
-            wall_normal    = wall_n_unit,
-            n_slabs        = args.n_slabs,
-            slab_thickness = args.slab_thickness,
-            min_pts_slab   = args.min_pts_slab,
-        )
+            if sc['wall'] is not None:
+                ws   = sc['wall']
+                n2d  = ws['normal_2d']
+                wall_n = np.array([n2d[0], n2d[1], 0.0])
+                angle  = np.degrees(np.arctan2(n2d[1], n2d[0]))
+                print(f"    Wall {sc_idx+1}: {len(sc_pts):>7,} pts  "
+                      f"normal={angle:+.1f}°  depth={wall_depth:.3f}  ", end="")
+            else:
+                wall_n = _pca_wall_normal(sc_pts) or wall_n
+                wall_depth = None
+                print(f"    Wall {sc_idx+1}: {len(sc_pts):>7,} pts  [PCA fallback]  ", end="")
 
-        if not prism_list:
-            print("→ no slabs emitted, skipped")
-            continue
+            if len(sc_pts) < args.min_pts_slab:
+                print("→ too few points, skipped")
+                continue
 
-        # Flatten all prism faces into one MultiSurface per feature
-        all_faces = [face for prism in prism_list for face in prism]
-        n_faces   = len(all_faces)
-        print(f"→ {len(prism_list)} slabs × 6 faces = {n_faces} polygons")
+            wall_n_unit = wall_n / np.linalg.norm(wall_n)
 
-        # ── Convert to CityGML ───────────────────────────────────
-        gml_id      = f"{ftype}_{i+1}_{uuid.uuid4().hex[:8]}"
-        citygml_type = ftype if ftype in ("window", "door") else "installation"
-        fragment    = feature_to_gml(citygml_type, gml_id, all_faces)
-        gml_fragments.append(fragment)
+            prism_list = tessellate_curved_cluster(
+                sc_pts,
+                wall_normal    = wall_n_unit,
+                n_slabs        = 1,
+                slab_thickness = args.slab_thickness,
+                min_pts_slab   = args.min_pts_slab,
+                wall_depth     = wall_depth,
+                wall_coords    = ws['coords'] if sc['wall'] is not None else None
+            )
 
-        summary[ftype] = summary.get(ftype, 0) + 1
+            if not prism_list:
+                print("→ no slabs emitted, skipped")
+                continue
+
+            all_faces = [face for prism in prism_list for face in prism]
+            print(f"→ {len(prism_list)} slabs × 6 = {len(all_faces)} polygons")
+
+            gml_id       = f"{ftype}_{i+1}_w{sc_idx+1}_{uuid.uuid4().hex[:8]}"
+            citygml_type = ftype if ftype in ("window", "door") else "installation"
+            fragment     = feature_to_gml(citygml_type, gml_id, all_faces)
+            gml_fragments.append(fragment)
+
+        summary[ftype] = summary.get(ftype, 0) + len(sub_clusters)
 
     if not gml_fragments:
         print("\n  No tessellated features created. "

@@ -4,8 +4,11 @@ Facade Features → CityGML LOD3 Pipeline.
 
 Each run selects one GML model and one or more .las point clouds.  For every
 point cloud the user manually chooses the CityGML feature type (Window, Door,
-or BuildingInstallation).  All clouds are DBSCAN-clustered, bounding-boxed,
-and combined into a single output GML file.
+or BuildingInstallation).  All clouds are DBSCAN-clustered; each cluster is
+matched to the nearest WallSurface from the LOD2 GML (using the same 3-stage
+spatial-intersection → normal-alignment → PCA fallback as 11_curve_handling.py).
+Bounding boxes are axis-aligned to their matched WallSurface normal, and the
+resulting GML elements are attached to that wall.
 
 Usage:
     conda activate lidar-test
@@ -129,34 +132,43 @@ def cluster_features(points, user_ftype, eps, min_samples):
 
 
 # =====================================================================
-# Parse wall normals from a LOD2 GML file
+# Parse WallSurfaces from a LOD2 GML file  (ported from 11_curve_handling.py)
 # =====================================================================
-def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
+def parse_wall_surfaces_from_gml(gml_path):
     """
-    Extract horizontal (XY-plane) unit normals from every WallSurface polygon
-    found inside a CityGML file, then cluster near-parallel normals and return
-    only the *dominant* direction for each cluster.
+    Parse every WallSurface exterior polygon from a CityGML file.
 
-    This avoids noisy slivers biasing the normal selection.  Normals that
-    differ by less than *angle_tol_deg* are merged.
+    For each polygon the following dict is returned::
 
-    Returns a list of dominant 2-D unit vectors.
+        {
+          'coords':    ndarray(N, 3),   # raw ring vertices
+          'normal_2d': ndarray(2,),     # horizontal unit normal (XY)
+          'origin_2d': ndarray(2,),     # ring centroid projected to XY
+          'z_min':     float,
+          'z_max':     float,
+          'xy_min':    ndarray(2,),     # AABB corners in XY
+          'xy_max':    ndarray(2,),
+        }
+
+    Returns a list of such dicts (one per polygon found).
     """
     try:
         tree = ET.parse(gml_path)
         root = tree.getroot()
     except ET.ParseError as e:
-        print(f"  WARNING: could not parse GML for wall normals: {e}")
+        print(f"  WARNING: could not parse GML: {e}")
         return []
 
-    raw_normals = []
+    ns_bldg = 'http://www.opengis.net/citygml/building/2.0'
+    ns_gml  = 'http://www.opengis.net/gml'
 
-    for ws in root.iter('{http://www.opengis.net/citygml/building/2.0}WallSurface'):
-        for poly in ws.iter('{http://www.opengis.net/gml}Polygon'):
-            exterior = poly.find('.//{http://www.opengis.net/gml}exterior')
+    surfaces = []
+    for ws in root.iter(f'{{{ns_bldg}}}WallSurface'):
+        for poly in ws.iter(f'{{{ns_gml}}}Polygon'):
+            exterior = poly.find(f'.//{{{ns_gml}}}exterior')
             if exterior is None:
                 continue
-            pos_el = exterior.find('.//{http://www.opengis.net/gml}posList')
+            pos_el = exterior.find(f'.//{{{ns_gml}}}posList')
             if pos_el is None or not pos_el.text:
                 continue
 
@@ -164,99 +176,145 @@ def parse_wall_normals_from_gml(gml_path, angle_tol_deg=5.0):
             if len(vals) < 9:
                 continue
 
-            pts = np.array(vals).reshape(-1, 3)
-            if len(pts) < 3:
+            coords = np.array(vals, dtype=np.float64).reshape(-1, 3)
+            if len(coords) < 3:
                 continue
 
-            # Newell's method for polygon normal
+            # Newell's method → polygon normal
             n = np.zeros(3)
-            for i in range(len(pts)):
-                curr = pts[i]
-                nxt  = pts[(i + 1) % len(pts)]
+            for i in range(len(coords)):
+                curr = coords[i]
+                nxt  = coords[(i + 1) % len(coords)]
                 n[0] += (curr[1] - nxt[1]) * (curr[2] + nxt[2])
                 n[1] += (curr[2] - nxt[2]) * (curr[0] + nxt[0])
                 n[2] += (curr[0] - nxt[0]) * (curr[1] + nxt[1])
 
-            nh = n[:2]
+            nh  = n[:2]
             mag = np.linalg.norm(nh)
             if mag < 1e-6:
-                continue
-            raw_normals.append(nh / mag)
+                continue   # horizontal slab — skip
 
-    if not raw_normals:
-        print("  WARNING: no wall normals found in GML.")
-        return []
+            normal_2d = nh / mag
+            centroid  = coords.mean(axis=0)
 
-    # ── Cluster near-parallel normals and keep dominant directions ──
-    # Two normals are "same direction" if the angle between them (or their
-    # opposites) is < angle_tol_deg.
-    tol_cos = np.cos(np.radians(angle_tol_deg))
-    dominant = []  # list of (representative_normal, count)
-    raw_normals_arr = np.array(raw_normals)
+            surfaces.append({
+                'coords':    coords,
+                'normal_2d': normal_2d,
+                'origin_2d': centroid[:2].copy(),
+                'z_min':     float(coords[:, 2].min()),
+                'z_max':     float(coords[:, 2].max()),
+                'xy_min':    coords[:, :2].min(axis=0),
+                'xy_max':    coords[:, :2].max(axis=0),
+            })
 
-    for nv in raw_normals_arr:
-        matched = False
-        for idx, (rep, cnt) in enumerate(dominant):
-            # Accept n or -n as same wall face
-            if abs(float(np.dot(nv, rep))) >= tol_cos:
-                # Running average (Welford-style direction update)
-                new_rep = rep * cnt + nv * np.sign(float(np.dot(nv, rep)))
-                nr = np.linalg.norm(new_rep)
-                dominant[idx] = (new_rep / nr if nr > 1e-9 else rep, cnt + 1)
-                matched = True
-                break
-        if not matched:
-            dominant.append((nv, 1))
-
-    # Sort by frequency, return the most common directions
-    dominant.sort(key=lambda x: x[1], reverse=True)
-    dominant_normals = [d[0] for d in dominant]
-
-    print(f"  Extracted {len(raw_normals)} raw wall normals "
-          f"→ {len(dominant_normals)} dominant directions from GML.")
-    for i, (nv, cnt) in enumerate(dominant):
-        angle = np.degrees(np.arctan2(nv[1], nv[0]))
-        print(f"    [{i+1}] angle={angle:+.1f}°  count={cnt}")
-    return dominant_normals
+    print(f"  Parsed {len(surfaces)} WallSurface polygon(s) from GML.")
+    if not surfaces:
+        print("  WARNING: no WallSurface polygons found.")
+    return surfaces
 
 
-def _best_wall_normal(points, wall_normals):
+def _pca_normal_2d(points):
     """
-    Given a point cluster and a list of candidate 2-D horizontal wall normals,
-    return the wall normal whose perpendicular direction best aligns with the
-    cluster's dominant horizontal spread axis (i.e. the cluster lies *on* a
-    wall, so the spread axis is the wall tangent and the normal is perpendicular
-    to that).
-
-    Returns a normalised 3-D vector (wall normal, with Z=0).
+    Return the PCA-estimated wall normal as a 2-D unit vector, or None.
+    Used by Stage 2 of find_wall_normal_for_cluster for dot-product matching.
     """
-    if not wall_normals:
+    if len(points) < 3:
         return None
-
-    # PCA on XY to find the horizontal spread direction (tangent to the wall)
-    xy = points[:, :2]
+    xy  = points[:, :2]
     cxy = xy - xy.mean(axis=0)
     cov = cxy.T @ cxy
-    eig_vals, eig_vecs = np.linalg.eigh(cov)  # ascending order
-    # Largest eigenvalue → first principal direction = wall tangent (along wall)
-    tangent_2d = eig_vecs[:, 1]   # index 1 = largest
+    _, eig_vecs = np.linalg.eigh(cov)
+    tang = eig_vecs[:, 1]
+    return np.array([-tang[1], tang[0]])
 
-    # The wall normal is perpendicular to the tangent in XY
-    cluster_normal_2d = np.array([-tangent_2d[1], tangent_2d[0]])
 
-    # Pick the candidate wall normal most aligned with our estimate
-    best_n = None
-    best_dot = -1.0
-    for wn in wall_normals:
-        dot = abs(float(np.dot(cluster_normal_2d, wn)))
-        if dot > best_dot:
-            best_dot = dot
-            best_n = wn
-
-    if best_n is None:
+def _pca_wall_normal(points):
+    """
+    Estimate the wall normal from the cluster's dominant horizontal spread
+    (PCA in XY).  Returns a 3-D vector with Z = 0, or None if degenerate.
+    """
+    n2d = _pca_normal_2d(points)
+    if n2d is None:
         return None
+    return np.array([n2d[0], n2d[1], 0.0])
 
-    return np.array([best_n[0], best_n[1], 0.0])
+
+def find_wall_normal_for_cluster(points, wall_surfaces,
+                                 dist_tol=2.0, z_expand=0.5):
+    """
+    Return the exact 2-D horizontal unit normal (as a 3-D vector with Z = 0)
+    of the best-matching WallSurface for *points*, using three stages:
+
+    Stage 1 — Spatial intersection:
+      Checks Z overlap, signed centroid-to-plane distance < dist_tol, and
+      XY footprint. Picks the wall with the smallest |distance|.
+
+    Stage 2 — Normal alignment (coordinate-independent fallback):
+      Estimates cluster's wall normal via PCA, then picks the WallSurface
+      whose exact normal best aligns with that estimate.
+
+    Stage 3 — Pure PCA (only when no wall surfaces exist at all).
+
+    Also returns the matched WallSurface dict (or None).
+    """
+    if not wall_surfaces:
+        print("[PCA – no wall surfaces]", end=" ")
+        return _pca_wall_normal(points), None
+
+    cl_z_min = float(points[:, 2].min())
+    cl_z_max = float(points[:, 2].max())
+    centroid  = points.mean(axis=0)
+    cxy       = centroid[:2]
+
+    # ── Stage 1: spatial intersection ───────────────────────────────
+    best_normal = None
+    best_wall   = None
+    best_dist   = float('inf')
+
+    for ws in wall_surfaces:
+        if cl_z_max < ws['z_min'] - z_expand or cl_z_min > ws['z_max'] + z_expand:
+            continue
+        n2d = ws['normal_2d']
+        d   = float(np.dot(cxy - ws['origin_2d'], n2d))
+        if abs(d) >= dist_tol:
+            continue
+        proj_xy = cxy - d * n2d
+        pad = dist_tol
+        if (proj_xy[0] < ws['xy_min'][0] - pad or
+                proj_xy[0] > ws['xy_max'][0] + pad or
+                proj_xy[1] < ws['xy_min'][1] - pad or
+                proj_xy[1] > ws['xy_max'][1] + pad):
+            continue
+        if abs(d) < best_dist:
+            best_dist   = abs(d)
+            best_normal = n2d
+            best_wall   = ws
+
+    if best_normal is not None:
+        angle = np.degrees(np.arctan2(best_normal[1], best_normal[0]))
+        print(f"[Stage1: dist={best_dist:.2f} m, angle={angle:+.1f}°]", end=" ")
+        return np.array([best_normal[0], best_normal[1], 0.0]), best_wall
+
+    # ── Stage 2: alignment with exact per-surface normals ────────────
+    pca_n = _pca_normal_2d(points)
+    if pca_n is not None:
+        best_dot     = -1.0
+        align_normal = None
+        align_wall   = None
+        for ws in wall_surfaces:
+            dot = abs(float(np.dot(pca_n, ws['normal_2d'])))
+            if dot > best_dot:
+                best_dot     = dot
+                align_normal = ws['normal_2d']
+                align_wall   = ws
+        if align_normal is not None:
+            angle = np.degrees(np.arctan2(align_normal[1], align_normal[0]))
+            print(f"[Stage2: align={best_dot:.3f}, angle={angle:+.1f}°]", end=" ")
+            return np.array([align_normal[0], align_normal[1], 0.0]), align_wall
+
+    # ── Stage 3: pure PCA fallback ───────────────────────────────────
+    print("[Stage3: PCA fallback]", end=" ")
+    return _pca_wall_normal(points), None
 
 
 def create_bbox_polygons(points, wall_normal=None):
@@ -465,8 +523,8 @@ def main():
     print(f"{'='*60}")
     gml_path = select_file(GML_DIR, "*.gml")
 
-    print(f"\n  Parsing wall normals from {os.path.basename(gml_path)} ...")
-    wall_normals = parse_wall_normals_from_gml(gml_path)
+    print(f"\n  Parsing WallSurfaces from {os.path.basename(gml_path)} ...")
+    wall_surfaces = parse_wall_surfaces_from_gml(gml_path)
 
     # ── 2. Collect point cloud inputs ──────────────────────────────
     print(f"\n{'='*60}")
@@ -523,7 +581,10 @@ def main():
             n_pts  = feat['n_points']
             print(f"\n    [{feat_counter}] {ftype:12s}  {n_pts:>8,} pts  ", end="")
 
-            wall_n   = _best_wall_normal(feat['points'], wall_normals)
+            # Find the nearest WallSurface via 3-stage spatial matching
+            wall_n, matched_wall = find_wall_normal_for_cluster(
+                feat['points'], wall_surfaces)
+
             polygons = create_bbox_polygons(feat['points'], wall_normal=wall_n)
 
             if not polygons:
@@ -531,7 +592,13 @@ def main():
                 continue
 
             n_verts = sum(len(p) - 1 for p in polygons)
-            print(f"→ {len(polygons)} faces, {n_verts} vertices")
+            if matched_wall is not None:
+                wall_angle = np.degrees(np.arctan2(
+                    matched_wall['normal_2d'][1], matched_wall['normal_2d'][0]))
+                print(f"→ {len(polygons)} faces, {n_verts} verts "
+                      f"(wall angle={wall_angle:+.1f}°)")
+            else:
+                print(f"→ {len(polygons)} faces, {n_verts} verts (PCA normal)")
 
             gml_id       = f"{ftype}_{feat_counter}_{uuid.uuid4().hex[:8]}"
             citygml_type = ftype if ftype in ("window", "door") else "installation"

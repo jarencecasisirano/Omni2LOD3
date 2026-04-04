@@ -65,8 +65,8 @@ NAMESPACES = {
 }
 
 BASE_DIR        = Path(__file__).resolve().parents[2]   # project root
-PC_BASE         = BASE_DIR / "outputs" / "05_manual_orient_point_cloud"
-GML_BASE        = BASE_DIR / "data" / "lod_2"
+PC_BASE         = BASE_DIR / "outputs" / "04_manual_cleaned_point_clouds"
+GML_BASE        = BASE_DIR / "outputs" / "00_gml_wall_merged"
 OUTPUT_BASE     = BASE_DIR / "outputs" / "06_aligned_p2p"
 
 MAX_DISPLAY_PTS = 80_000   # subsample for interactive display

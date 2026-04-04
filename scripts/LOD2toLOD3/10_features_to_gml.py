@@ -2,9 +2,10 @@
 """
 Facade Features → CityGML LOD3 Pipeline.
 
-Clusters facade feature points with DBSCAN, creates alpha-shape meshes,
-converts them to CityGML LOD3 semantics (Window, Door, BuildingInstallation),
-and appends them to an existing LOD2 GML model.
+Each run selects one GML model and one or more .las point clouds.  For every
+point cloud the user manually chooses the CityGML feature type (Window, Door,
+or BuildingInstallation).  All clouds are DBSCAN-clustered, bounding-boxed,
+and combined into a single output GML file.
 
 Usage:
     conda activate lidar-test
@@ -13,7 +14,8 @@ Usage:
 Options:
     --eps             DBSCAN neighbourhood radius (default: 0.3)
     --min_samples     DBSCAN minimum cluster size (default: 30)
-    --poisson_depth   Poisson reconstruction depth (default: 6)
+    --output, -o      Output GML filename (saved inside outputs/final/).
+                      If omitted, defaults to <gml_basename>_LOD3.gml
 """
 
 import os
@@ -32,19 +34,9 @@ from sklearn.cluster import DBSCAN
 # =====================================================================
 # Constants
 # =====================================================================
-LABEL_MAP = {
-    "other":   1,
-    "wall":    2,
-    "door":    3,
-    "window":  4,
-    "roof":    5,
-    "ground":  6,
-}
-LABEL_NAMES = {v: k for k, v in LABEL_MAP.items()}
-
-INPUT_DIR  = "outputs/trials"
-GML_DIR    = "outputs/00_gml_wall_merged"
-OUTPUT_DIR = "outputs/trials"
+INPUT_DIR  = "outputs/11B_flat"
+GML_DIR    = "outputs/12_curve_gml"
+OUTPUT_DIR = "outputs/final"
 
 
 # =====================================================================
@@ -77,59 +69,60 @@ def select_file(directory, pattern="*.las"):
 
 
 # =====================================================================
-# DBSCAN clustering — per-label, then spatial proximity
+# Interactive feature-type selector
 # =====================================================================
-def cluster_features(points, labels, eps, min_samples):
-    """
-    Sort points by semantic label first, then run DBSCAN independently
-    within each label group.  This prevents windows/doors from being
-    merged with 'other' structural features.
+FEATURE_TYPES = [
+    ('window', 'bldg:Window'),
+    ('door',   'bldg:Door'),
+    ('other',  'bldg:BuildingInstallation'),
+]
 
-    Label groups (by LABEL_MAP value):
-      - window  (4)
-      - door    (3)
-      - other / wall / roof / ground  → all mapped to 'other' or their name
+def prompt_feature_type():
+    """Ask the user which CityGML feature type the loaded point cloud represents."""
+    print("\n  CityGML feature type for this point cloud:")
+    for i, (name, tag) in enumerate(FEATURE_TYPES):
+        print(f"    [{i+1}] {name:8s}  ({tag})")
+    while True:
+        try:
+            choice = input(f"  Select [1-{len(FEATURE_TYPES)}]: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(FEATURE_TYPES):
+                return FEATURE_TYPES[idx][0]
+        except (ValueError, KeyboardInterrupt):
+            pass
+        print("  Invalid choice, try again.")
+
+
+# =====================================================================
+# DBSCAN clustering
+# =====================================================================
+def cluster_features(points, user_ftype, eps, min_samples):
+    """
+    Run DBSCAN on *points* and label every resulting cluster with *user_ftype*
+    (the feature type chosen interactively by the user).
 
     Returns list of dicts:
         { 'type': str, 'points': ndarray(N,3), 'n_points': int }
     """
-    # Canonical per-label name (collapse everything that isn't window/door)
-    def _label_group(code):
-        name = LABEL_NAMES.get(int(code), 'other')
-        if name in ('window', 'door'):
-            return name
-        return 'other'
+    print(f"  Running DBSCAN ({len(points):,} pts, "
+          f"eps={eps}, min_samples={min_samples}) ...")
+    db = DBSCAN(eps=eps, min_samples=min_samples)
+    cluster_ids = db.fit_predict(points)
 
-    # Unique groups present in this point cloud
-    label_groups = sorted(set(_label_group(c) for c in labels))
-    print(f"\n  Label groups present: {label_groups}")
+    unique_clusters = set(cluster_ids)
+    unique_clusters.discard(-1)
+    n_noise = int((cluster_ids == -1).sum())
+    print(f"    → {len(unique_clusters)} clusters, "
+          f"{n_noise:,} noise points discarded")
 
     features = []
-    for group in label_groups:
-        # Build mask for this group
-        mask = np.array([_label_group(c) == group for c in labels])
-        group_pts = points[mask]
-        if len(group_pts) == 0:
-            continue
-
-        print(f"  Running DBSCAN on '{group}' ({len(group_pts):,} pts, "
-              f"eps={eps}, min_samples={min_samples}) ...")
-        db = DBSCAN(eps=eps, min_samples=min_samples)
-        cluster_ids = db.fit_predict(group_pts)
-
-        unique_clusters = set(cluster_ids)
-        unique_clusters.discard(-1)
-        n_noise = int((cluster_ids == -1).sum())
-        print(f"    → {len(unique_clusters)} clusters, "
-              f"{n_noise:,} noise points discarded")
-
-        for cid in sorted(unique_clusters):
-            cmask = cluster_ids == cid
-            features.append({
-                'type':     group,
-                'points':   group_pts[cmask],
-                'n_points': int(cmask.sum()),
-            })
+    for cid in sorted(unique_clusters):
+        cmask = cluster_ids == cid
+        features.append({
+            'type':     user_ftype,
+            'points':   points[cmask],
+            'n_points': int(cmask.sum()),
+        })
 
     features.sort(key=lambda f: f['n_points'], reverse=True)
     return features
@@ -456,6 +449,9 @@ def main():
                         help="DBSCAN eps (neighbourhood radius)")
     parser.add_argument("--min_samples", type=int, default=30,
                         help="DBSCAN min_samples")
+    parser.add_argument("--output", "-o", type=str, default=None,
+                        help="Output GML filename (saved inside outputs/final/). "
+                             "If omitted, defaults to <gml_basename>_LOD3.gml")
 
     args = parser.parse_args()
 
@@ -463,116 +459,107 @@ def main():
     print("  Facade Features → CityGML LOD3")
     print("=" * 60)
 
-    # ── 1. Select point cloud ──────────────────────────────────────
-    las_path = select_file(INPUT_DIR, "*.las")
-    las_fname = os.path.basename(las_path).lower()
-    print(f"\n  Loading: {os.path.basename(las_path)}")
-
-    # Infer default feature type from filename
-    inferred_type = "other"
-    if "window" in las_fname:
-        inferred_type = "window"
-    elif "door" in las_fname:
-        inferred_type = "door"
-    print(f"  Inferred feature type: {inferred_type}")
-
-    las = laspy.read(las_path)
-    points = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
-    classifications = np.array(las.classification, dtype=np.uint8)
-    n_total = len(points)
-    print(f"  Total points: {n_total:,}")
-
-    # Label breakdown
-    print(f"\n  Label breakdown:")
-    unique, counts = np.unique(classifications, return_counts=True)
-    for code, count in zip(unique, counts):
-        name = LABEL_NAMES.get(code, f"Unknown({code})")
-        pct = 100.0 * count / n_total
-        print(f"    {name:20s}: {count:>10,} pts ({pct:5.1f}%)")
-
-    # ── 2. DBSCAN clustering ──────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"  CLUSTERING  (eps={args.eps}, min_samples={args.min_samples})")
-    print(f"{'='*60}")
-
-    features = cluster_features(points, classifications,
-                                eps=args.eps,
-                                min_samples=args.min_samples)
-
-    if not features:
-        print("\n  No feature clusters found. Try adjusting --eps or --min_samples.")
-        return
-
-    print(f"\n  Total feature clusters: {len(features)}")
-
-    # ── 3. Select target GML model (needed early for wall normals) ──
+    # ── 1. Select target GML model ─────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  SELECT TARGET GML MODEL")
     print(f"{'='*60}")
     gml_path = select_file(GML_DIR, "*.gml")
 
-    # Parse wall normals from the chosen GML
     print(f"\n  Parsing wall normals from {os.path.basename(gml_path)} ...")
     wall_normals = parse_wall_normals_from_gml(gml_path)
 
-    # ── 4. Wall-aligned bounding-box meshing ──────────────────────
+    # ── 2. Collect point cloud inputs ──────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  MESHING  (Wall-aligned bounding box)")
+    print(f"  SELECT POINT CLOUD INPUT(S)")
+    print(f"{'='*60}")
+    print("  You can add multiple point clouds; all will be combined into"
+          " one output GML.")
+
+    las_inputs = []   # list of (las_path, feature_type)
+    while True:
+        las_path     = select_file(INPUT_DIR, "*.las")
+        feature_type = prompt_feature_type()
+        las_inputs.append((las_path, feature_type))
+        print(f"\n  ✓ Added: {os.path.basename(las_path):45s} → {feature_type}")
+
+        again = input("\n  Add another point cloud? [y/N]: ").strip().lower()
+        if again != 'y':
+            break
+
+    print(f"\n  {len(las_inputs)} point cloud(s) selected:")
+    for lp, ft in las_inputs:
+        print(f"    {os.path.basename(lp):45s} → {ft}")
+
+    # ── 3. DBSCAN clustering + meshing ──────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  CLUSTERING + MESHING  "
+          f"(eps={args.eps}, min_samples={args.min_samples})")
     print(f"{'='*60}")
 
     gml_fragments = []
-    summary = {}
+    summary       = {}
+    feat_counter  = 0   # global index across all clouds
 
-    for i, feat in enumerate(features):
-        # Semantic type: clusters from per-label DBSCAN already carry the
-        # right label ('window', 'door', or 'other'). For 'other' we always
-        # output BuildingInstallation regardless of filename inference.
-        ftype = feat['type']   # 'window' | 'door' | 'other'
-        if ftype not in ('window', 'door'):
-            ftype = 'other'    # normalise roof/wall/ground → 'other'
-        # NOTE: filename-inference override removed — per-label DBSCAN already
-        # assigns the authoritative type. 'other' → bldg:BuildingPart always.
+    for pc_idx, (las_path, user_ftype) in enumerate(las_inputs):
+        print(f"\n  [{pc_idx+1}/{len(las_inputs)}] "
+              f"{os.path.basename(las_path)}  [{user_ftype}]")
 
-        n_pts  = feat['n_points']
-        print(f"\n  [{i+1}/{len(features)}] {ftype:12s}  {n_pts:>8,} pts  ", end="")
+        las    = laspy.read(las_path)
+        points = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
+        print(f"    Points loaded: {len(points):,}")
 
-        # Find the best-matching wall normal for this cluster
-        wall_n = _best_wall_normal(feat['points'], wall_normals)
-        polygons = create_bbox_polygons(feat['points'], wall_normal=wall_n)
-
-        if not polygons:
-            print("→ BBox failed, skipped")
+        features = cluster_features(points, user_ftype,
+                                    eps=args.eps,
+                                    min_samples=args.min_samples)
+        if not features:
+            print(f"    No clusters found — skipping this cloud.")
             continue
 
-        n_verts = sum(len(p) - 1 for p in polygons)  # minus closing vertex
-        print(f"→ {len(polygons)} faces, {n_verts} vertices")
+        print(f"    Clusters found: {len(features)}")
 
-        # ── Convert to CityGML ──────────────────────────────────
-        gml_id = f"{ftype}_{i+1}_{uuid.uuid4().hex[:8]}"
-        # 'other' → BuildingInstallation; window/door → opening
-        citygml_type = ftype if ftype in ("window", "door") else "installation"
-        fragment = feature_to_gml(citygml_type, gml_id, polygons)
-        gml_fragments.append(fragment)
+        for feat in features:
+            feat_counter += 1
+            ftype  = feat['type']
+            n_pts  = feat['n_points']
+            print(f"\n    [{feat_counter}] {ftype:12s}  {n_pts:>8,} pts  ", end="")
 
-        summary[ftype] = summary.get(ftype, 0) + 1
+            wall_n   = _best_wall_normal(feat['points'], wall_normals)
+            polygons = create_bbox_polygons(feat['points'], wall_normal=wall_n)
+
+            if not polygons:
+                print("→ BBox failed, skipped")
+                continue
+
+            n_verts = sum(len(p) - 1 for p in polygons)
+            print(f"→ {len(polygons)} faces, {n_verts} vertices")
+
+            gml_id       = f"{ftype}_{feat_counter}_{uuid.uuid4().hex[:8]}"
+            citygml_type = ftype if ftype in ("window", "door") else "installation"
+            fragment     = feature_to_gml(citygml_type, gml_id, polygons)
+            gml_fragments.append(fragment)
+
+            summary[ftype] = summary.get(ftype, 0) + 1
 
     if not gml_fragments:
         print("\n  No meshes created. Nothing to append.")
         return
 
-    # Summary
+    # ── 4. Summary ───────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  FEATURE SUMMARY")
     print(f"{'='*60}")
     for ftype, count in sorted(summary.items()):
-        citygml = {"window": "bldg:Window", "door": "bldg:Door"}.get(
-            ftype, "bldg:BuildingInstallation")
+        citygml = {"window": "bldg:Window",
+                   "door":   "bldg:Door"}.get(ftype, "bldg:BuildingInstallation")
         print(f"    {ftype:12s} → {citygml:30s} × {count}")
     print(f"    {'Total':12s}   {' ':30s}   {len(gml_fragments)}")
 
     # ── 5. Append and save ───────────────────────────────────────
-    gml_basename = os.path.splitext(os.path.basename(gml_path))[0]
-    out_name = f"{gml_basename}_LOD3_test1.gml"
+    if args.output:
+        out_name = args.output if args.output.endswith(".gml") else args.output + ".gml"
+    else:
+        gml_basename = os.path.splitext(os.path.basename(gml_path))[0]
+        out_name     = f"{gml_basename}_LOD3.gml"
     output_path = os.path.join(OUTPUT_DIR, out_name)
 
     print(f"\n  Appending {len(gml_fragments)} LOD3 features "

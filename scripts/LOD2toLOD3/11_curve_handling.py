@@ -2,21 +2,20 @@
 """
 Facade Features → CityGML LOD3 Pipeline  (with curved-geometry tessellation).
 
-Points are sorted by semantic label (window / door / other), then each label
-group is *tessellated* directly into a series of **axis-aligned rectangular
-prisms** (slabs) snapped to the corresponding LOD2 WallSurface normal.  The
-slabs form a staircase approximation of any curved profile (arched windows,
-bay windows, rounded protrusions), similar in spirit to the planar-facet
-decomposition used by the geoflow3d/geoflow-bundle project.
+Each run selects one GML model and one or more .las point clouds.  For every
+point cloud the user manually chooses the CityGML feature type (Window, Door,
+or BuildingInstallation).  All clouds are tessellated and combined into a
+single output GML file.
 
 Usage:
     conda activate las-env
     python scripts/LOD2toLOD3/11_curve_handling.py [options]
 
 Options:
-    --n_slabs         Tessellation slabs per label group along wall tangent (default: 20)
+    --n_slabs         Tessellation slabs per wall sub-cluster (default: 20)
     --slab_thickness  Half-depth of each slab in wall-normal direction, metres (default: 0.15)
     --min_pts_slab    Minimum points needed for a slab to be emitted (default: 5)
+    --output, -o      Output GML filename (default: <gml_basename>_LOD3_curved.gml)
 """
 
 import os
@@ -33,19 +32,9 @@ import laspy
 # =====================================================================
 # Constants
 # =====================================================================
-LABEL_MAP = {
-    "other":   1,
-    "wall":    2,
-    "door":    3,
-    "window":  4,
-    "roof":    5,
-    "ground":  6,
-}
-LABEL_NAMES = {v: k for k, v in LABEL_MAP.items()}
-
-INPUT_DIR  = "outputs/12_facade_curve"
-GML_DIR    = "data/lod_2"
-OUTPUT_DIR = "outputs/13_facade_curve_tesselated"
+INPUT_DIR  = "outputs/11A_facade_curve"
+GML_DIR    = "outputs/00_gml_wall_merged"
+OUTPUT_DIR = "outputs/12_curve_gml"
 
 
 # =====================================================================
@@ -78,42 +67,28 @@ def select_file(directory, pattern="*.las"):
 
 
 # =====================================================================
-# Label grouping (no clustering — one feature per semantic class)
+# Interactive feature-type selector
 # =====================================================================
-def group_by_label(points, labels):
-    """
-    Partition *points* into one feature per semantic label group.
+FEATURE_TYPES = [
+    ('window', 'bldg:Window'),
+    ('door',   'bldg:Door'),
+    ('other',  'bldg:BuildingInstallation'),
+]
 
-    Label mapping:
-      window (4)  → 'window'
-      door   (3)  → 'door'
-      everything else → 'other'
-
-    Returns a list of dicts sorted by point count (descending):
-        { 'type': str, 'points': ndarray(N,3), 'n_points': int }
-    """
-    def _label_group(code):
-        name = LABEL_NAMES.get(int(code), 'other')
-        return name if name in ('window', 'door') else 'other'
-
-    label_groups = sorted(set(_label_group(c) for c in labels))
-    print(f"\n  Label groups present: {label_groups}")
-
-    features = []
-    for group in label_groups:
-        mask      = np.array([_label_group(c) == group for c in labels])
-        group_pts = points[mask]
-        if len(group_pts) == 0:
-            continue
-        print(f"  Group '{group}': {len(group_pts):,} pts")
-        features.append({
-            'type':     group,
-            'points':   group_pts,
-            'n_points': len(group_pts),
-        })
-
-    features.sort(key=lambda f: f['n_points'], reverse=True)
-    return features
+def prompt_feature_type():
+    """Ask the user which CityGML feature type the loaded point cloud represents."""
+    print("\n  CityGML feature type for this point cloud:")
+    for i, (name, tag) in enumerate(FEATURE_TYPES):
+        print(f"    [{i+1}] {name:8s}  ({tag})")
+    while True:
+        try:
+            choice = input(f"  Select [1-{len(FEATURE_TYPES)}]: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(FEATURE_TYPES):
+                return FEATURE_TYPES[idx][0]
+        except (ValueError, KeyboardInterrupt):
+            pass
+        print("  Invalid choice, try again.")
 
 
 # =====================================================================
@@ -593,107 +568,102 @@ def main():
     parser = argparse.ArgumentParser(
         description="Facade Features → CityGML LOD3 (curved geometry via tessellation)")
     parser.add_argument("--n_slabs",        type=int,   default=20,
-                        help="Number of tessellation slabs per label group "
-                             "along the wall tangent direction")
+                        help="Number of tessellation slabs per wall sub-cluster")
     parser.add_argument("--slab_thickness", type=float, default=0.15,
                         help="Half-depth of each slab in the wall-normal "
                              "direction (metres). The prism spans "
                              "[depth_mid - t, depth_mid + t].")
     parser.add_argument("--min_pts_slab",   type=int,   default=5,
                         help="Minimum points required for a slab to be emitted")
+    parser.add_argument("--output", "-o",   type=str,   default=None,
+                        help="Output GML filename (saved inside outputs/12_curve_gml/). "
+                             "If omitted, defaults to <gml_basename>_LOD3_curved.gml")
     args = parser.parse_args()
 
     print("=" * 60)
     print("  Facade Features → CityGML LOD3  [curved tessellation]")
     print("=" * 60)
 
-    # ── 1. Select point cloud ──────────────────────────────────────
-    las_path = select_file(INPUT_DIR, "*.las")
-    print(f"\n  Loading: {os.path.basename(las_path)}")
-
-    las = laspy.read(las_path)
-    points          = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
-    classifications = np.array(las.classification, dtype=np.uint8)
-    n_total         = len(points)
-    print(f"  Total points: {n_total:,}")
-
-    # Label breakdown
-    print(f"\n  Label breakdown:")
-    unique, counts = np.unique(classifications, return_counts=True)
-    for code, count in zip(unique, counts):
-        name = LABEL_NAMES.get(code, f"Unknown({code})")
-        pct  = 100.0 * count / n_total
-        print(f"    {name:20s}: {count:>10,} pts ({pct:5.1f}%)")
-
-    # ── 2. Group by label (no clustering) ─────────────────────────
-    print(f"\n{'='*60}")
-    print(f"  LABEL GROUPING")
-    print(f"{'='*60}")
-
-    features = group_by_label(points, classifications)
-    if not features:
-        print("\n  No label groups found in point cloud.")
-        return
-
-    print(f"\n  Total label groups: {len(features)}")
-
-    # ── 3. Select target GML model ─────────────────────────────────
+    # ── 1. Select target GML model ─────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  SELECT TARGET GML MODEL")
     print(f"{'='*60}")
     gml_path = select_file(GML_DIR, "*.gml")
 
-    # Parse WallSurface geometry for intersection-based normal selection
     print(f"\n  Parsing WallSurfaces from {os.path.basename(gml_path)} ...")
     wall_surfaces = parse_wall_surfaces_from_gml(gml_path)
 
-    # ── 4. Tessellation ───────────────────────────────────────────
+    # ── 2. Collect point cloud inputs ──────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  SELECT POINT CLOUD INPUT(S)")
+    print(f"{'='*60}")
+    print("  You can add multiple point clouds; all will be combined into"
+          " one output GML.")
+
+    las_inputs = []   # list of (las_path, feature_type)
+    while True:
+        las_path     = select_file(INPUT_DIR, "*.las")
+        feature_type = prompt_feature_type()
+        las_inputs.append((las_path, feature_type))
+        print(f"\n  ✓ Added: {os.path.basename(las_path):45s} → {feature_type}")
+
+        again = input("\n  Add another point cloud? [y/N]: ").strip().lower()
+        if again != 'y':
+            break
+
+    print(f"\n  {len(las_inputs)} point cloud(s) selected:")
+    for lp, ft in las_inputs:
+        print(f"    {os.path.basename(lp):45s} → {ft}")
+
+    # ── 3. Tessellation ───────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  TESSELLATION  "
-          f"(n_slabs={args.n_slabs}, slab_thickness=±{args.slab_thickness} m)")
+          f"(slab_thickness=±{args.slab_thickness} m, "
+          f"min_pts_slab={args.min_pts_slab})")
     print(f"{'='*60}")
 
     gml_fragments = []
     summary       = {}
 
-    for i, feat in enumerate(features):
-        ftype  = feat['type']
-        if ftype not in ('window', 'door'):
-            ftype = 'other'
+    for pc_idx, (las_path, user_ftype) in enumerate(las_inputs):
+        print(f"\n  [{pc_idx+1}/{len(las_inputs)}] "
+              f"{os.path.basename(las_path)}  [{user_ftype}]")
 
-        n_pts = feat['n_points']
-        pts   = feat['points']
-        print(f"\n  [{i+1}/{len(features)}] {ftype:10s}  {n_pts:>8,} pts")
+        las    = laspy.read(las_path)
+        points = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
+        print(f"    Points loaded: {len(points):,}")
 
-        # ── Split label group by WallSurface ────────────────────────────
+        # ── Split by closest WallSurface ────────────────────────────────
         if wall_surfaces:
-            sub_clusters = split_by_wall(pts, wall_surfaces)
+            sub_clusters = split_by_wall(points, wall_surfaces)
             print(f"    → split into {len(sub_clusters)} wall sub-cluster(s)")
         else:
-            # No GML surfaces: treat whole group as one cluster with PCA normal
-            wall_n = _pca_wall_normal(pts)
+            wall_n = _pca_wall_normal(points)
             if wall_n is None:
                 print("    → no wall surfaces and PCA failed, skipped")
                 continue
             sub_clusters = [{
                 'wall':              None,
-                'points':            pts,
+                'points':            points,
                 'wall_origin_depth': None,
             }]
 
         for sc_idx, sc in enumerate(sub_clusters):
-            sc_pts = sc['points']
-            wall_depth = sc['wall_origin_depth']   # exact wall-plane depth
+            sc_pts     = sc['points']
+            wall_depth = sc['wall_origin_depth']
 
             if sc['wall'] is not None:
-                ws   = sc['wall']
-                n2d  = ws['normal_2d']
+                ws     = sc['wall']
+                n2d    = ws['normal_2d']
                 wall_n = np.array([n2d[0], n2d[1], 0.0])
                 angle  = np.degrees(np.arctan2(n2d[1], n2d[0]))
                 print(f"    Wall {sc_idx+1}: {len(sc_pts):>7,} pts  "
                       f"normal={angle:+.1f}°  depth={wall_depth:.3f}  ", end="")
             else:
-                wall_n = _pca_wall_normal(sc_pts) or wall_n
+                wall_n = _pca_wall_normal(sc_pts)
+                if wall_n is None:
+                    print(f"    Wall {sc_idx+1}: PCA failed, skipped")
+                    continue
                 wall_depth = None
                 print(f"    Wall {sc_idx+1}: {len(sc_pts):>7,} pts  [PCA fallback]  ", end="")
 
@@ -720,19 +690,19 @@ def main():
             all_faces = [face for prism in prism_list for face in prism]
             print(f"→ {len(prism_list)} slabs × 6 = {len(all_faces)} polygons")
 
-            gml_id       = f"{ftype}_{i+1}_w{sc_idx+1}_{uuid.uuid4().hex[:8]}"
-            citygml_type = ftype if ftype in ("window", "door") else "installation"
+            gml_id       = f"{user_ftype}_{pc_idx+1}_w{sc_idx+1}_{uuid.uuid4().hex[:8]}"
+            citygml_type = user_ftype if user_ftype in ("window", "door") else "installation"
             fragment     = feature_to_gml(citygml_type, gml_id, all_faces)
             gml_fragments.append(fragment)
 
-        summary[ftype] = summary.get(ftype, 0) + len(sub_clusters)
+        summary[user_ftype] = summary.get(user_ftype, 0) + len(sub_clusters)
 
     if not gml_fragments:
         print("\n  No tessellated features created. "
-              "Try reducing --min_pts_slab or --n_slabs.")
+              "Try reducing --min_pts_slab.")
         return
 
-    # ── 5. Summary ───────────────────────────────────────────────
+    # ── 4. Summary ───────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  FEATURE SUMMARY")
     print(f"{'='*60}")
@@ -742,10 +712,13 @@ def main():
         print(f"    {ftype:12s} → {citygml:30s} × {count}")
     print(f"    {'Total':12s}   {' ':30s}   {len(gml_fragments)}")
 
-    # ── 6. Append and save ───────────────────────────────────────
-    gml_basename = os.path.splitext(os.path.basename(gml_path))[0]
-    out_name     = f"{gml_basename}_LOD3_curved.gml"
-    output_path  = os.path.join(OUTPUT_DIR, out_name)
+    # ── 5. Append and save ───────────────────────────────────────
+    if args.output:
+        out_name = args.output if args.output.endswith(".gml") else args.output + ".gml"
+    else:
+        gml_basename = os.path.splitext(os.path.basename(gml_path))[0]
+        out_name     = f"{gml_basename}_LOD3_curved.gml"
+    output_path = os.path.join(OUTPUT_DIR, out_name)
 
     print(f"\n  Appending {len(gml_fragments)} LOD3 features "
           f"to {os.path.basename(gml_path)} ...")

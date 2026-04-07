@@ -218,6 +218,7 @@ def merge_wall_surfaces(wall_surfaces: List[WallSurface],
     merged_flags = [False] * len(wall_surfaces)
     merged_surfaces = []
     merge_count = 0
+    wall_surface_counter = 0  # Used to generate unique IDs
     
     for i, wall in enumerate(wall_surfaces):
         if merged_flags[i]:
@@ -265,9 +266,14 @@ def merge_wall_surfaces(wall_surfaces: List[WallSurface],
                     changed = True
         
         # Create merged surface from group
+        wall_surface_counter += 1
+        unique_id = f"WallSurface_{wall_surface_counter}"
+
         if len(group) == 1:
-            # No merging needed
-            merged_surfaces.append(wall_surfaces[group[0]])
+            # No merging needed — reassign with unique ID
+            original = wall_surfaces[group[0]]
+            original.id = unique_id
+            merged_surfaces.append(original)
         else:
             # Merge multiple surfaces
             all_vertices = []
@@ -303,19 +309,22 @@ def merge_wall_surfaces(wall_surfaces: List[WallSurface],
                 # Get 3D coordinates of hull vertices
                 hull_vertices_3d = combined_vertices[hull_indices]
                 
-                # Create merged surface
-                merged_id = f"MERGED_{len(group)}_surfaces"
-                merged_surface = WallSurface(merged_id, hull_vertices_3d, wall_surfaces[group[0]].original_element)
+                # Create merged surface with unique ID
+                merged_surface = WallSurface(unique_id, hull_vertices_3d, wall_surfaces[group[0]].original_element)
                 merged_surfaces.append(merged_surface)
                 
                 merge_count += len(group) - 1
-                print(f"  ✓ Merged {len(group)} surfaces into {merged_id}")
+                print(f"  ✓ Merged {len(group)} surfaces → {unique_id}")
                 
             except Exception as e:
                 print(f"  ⚠ Warning: Could not merge group of {len(group)} surfaces: {e}")
-                # Fall back to keeping original surfaces
+                # Fall back to keeping original surfaces, each with a unique ID
                 for idx in group:
-                    merged_surfaces.append(wall_surfaces[idx])
+                    fallback = wall_surfaces[idx]
+                    fallback.id = unique_id
+                    merged_surfaces.append(fallback)
+                    wall_surface_counter += 1
+                    unique_id = f"WallSurface_{wall_surface_counter}"
     
     print(f"\n  Final count: {len(merged_surfaces)}")
     print(f"  Merged: {merge_count} surfaces")
@@ -342,7 +351,7 @@ def write_merged_gml(merged_surfaces: List[WallSurface], original_tree: etree._E
     building_elem = root.xpath('//bldg:Building', namespaces=NAMESPACES)[0]
     
     # Add merged surfaces
-    for i, merged_surface in enumerate(merged_surfaces):
+    for merged_surface in merged_surfaces:
         # Create WallSurface element
         wall_surface = etree.SubElement(
             building_elem,

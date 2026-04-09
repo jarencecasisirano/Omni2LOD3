@@ -121,7 +121,7 @@ def main():
     parser.add_argument(
         '-i', '--input', 
         type=str, 
-        default="outputs/06_aligned/p2p",
+        default="outputs/06_aligned_p2p/NEC-3",
         help="Path to the folder containing .las files."
     )
     args = parser.parse_args()
@@ -146,7 +146,7 @@ def main():
         
     print(f"Found {len(las_files)} files. Outputting to: {output_dir}")
     
-    RESOLUTION_METERS = 0.05 
+    RESOLUTION_METERS = 0.10
     
     for las_file in las_files:
         create_exr_from_las(las_file, output_dir, resolution=RESOLUTION_METERS)

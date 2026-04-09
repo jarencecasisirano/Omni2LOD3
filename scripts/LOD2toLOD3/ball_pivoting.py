@@ -8,7 +8,7 @@ print("Loading point cloud...")
 radius = 0.5
 max_nn = 30
 
-las_path = Path("outputs/08_normals/NIMBB-2-curve.las")
+las_path = Path("outputs/10_facade_features_cleaned/bldginstallation-final.las")
 las    = laspy.read(str(las_path))
 points = np.vstack((las.x, las.y, las.z)).T
 

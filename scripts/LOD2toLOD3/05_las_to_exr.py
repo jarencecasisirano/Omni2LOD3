@@ -121,7 +121,7 @@ def main():
     parser.add_argument(
         '-i', '--input', 
         type=str, 
-        default="outputs/06_aligned_p2p/NEC-3",
+        default="outputs/06_aligned_p2p/NIMBB-2",
         help="Path to the folder containing .las files."
     )
     args = parser.parse_args()

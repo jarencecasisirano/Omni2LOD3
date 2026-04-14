@@ -35,7 +35,7 @@ import laspy
 # Constants
 # =====================================================================
 INPUT_DIR  = "outputs/11A_facade_curve"
-GML_DIR    = "outputs/00_gml_wall_merged"
+GML_DIR    = "data/lod_2"
 OUTPUT_DIR = "outputs/12_curve_gml"
 HOLE_PAD   = 0.005   # metres
 

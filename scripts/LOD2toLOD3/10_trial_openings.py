@@ -245,6 +245,27 @@ def _pca_wall_normal(points):
     return np.array([n2d[0], n2d[1], 0.0])
 
 
+def find_nearest_wall(points, wall_surfaces):
+    """
+    Unconditional fallback: return the WallSurface whose plane is closest
+    (in absolute signed-distance) to the cluster centroid, ignoring Z and
+    XY bounding-box checks.  Used to force window/door clusters that failed
+    spatial intersection onto *some* wall so they are always emitted as
+    coplanar flat planes rather than 3-D bbox boxes.
+    """
+    if not wall_surfaces:
+        return None
+    cxy      = points.mean(axis=0)[:2]
+    best_ws  = None
+    best_d   = float('inf')
+    for ws in wall_surfaces:
+        d = abs(float(np.dot(cxy - ws['origin_2d'], ws['normal_2d'])))
+        if d < best_d:
+            best_d  = d
+            best_ws = ws
+    return best_ws
+
+
 def find_wall_normal_for_cluster(points, wall_surfaces,
                                  dist_tol=2.0, z_expand=0.5):
     """
@@ -405,41 +426,14 @@ def build_lod3_wall_fragment(wall_surface, openings, wall_frag_id):
     """
     Generate a CityGML <bldg:boundedBy> fragment for a WallSurface that
     has one or more openings cut through it.
-
-    Parameters
-    ----------
-    wall_surface : dict
-        A surface dict as returned by parse_wall_surfaces_from_gml.
-    openings : list of (proj_dict, feature_type, gml_id)
-        proj_dict    – dict returned by compute_wall_projection, containing
-                       'ring', 'n2d', 'wall_depth', 'txy'
-        feature_type – 'window' or 'door'
-        gml_id       – unique string identifier
-    wall_frag_id : str
-        gml:id for the new WallSurface element.
-
-    The exterior wall ring is projected onto the same idealized plane used
-    for the windows, so exterior and holes share a perfectly coplanar surface.
-    Each hole ring is inset by HOLE_PAD metres on all four sides so it is
-    strictly inside the exterior polygon, satisfying GML validity rules.
-    Each opening is also emitted as a <bldg:opening> child element.
     """
-    # ── Choose the projection frame from the first valid opening ──────
-    # All openings on the same wall share the same frame (n2d, wall_depth, txy).
-    frame = next(
-        (pd for pd, _, _ in openings if pd),
-        None
-    )
+    frame = next((pd for pd, _, _ in openings if pd), None)
 
     raw_coords = wall_surface['coords']
-    # Ensure closed
     if not np.allclose(raw_coords[0], raw_coords[-1]):
         raw_coords = np.vstack([raw_coords, raw_coords[0]])
 
     if frame:
-        # ── Project exterior coords onto the idealized wall plane ─────
-        # Any raw point p is replaced by the point on the plane that has
-        # the same (tangent, Z) coordinates but depth snapped to wall_depth.
         n2d        = frame['n2d']
         wall_depth = frame['wall_depth']
         txy        = frame['txy']
@@ -450,28 +444,24 @@ def build_lod3_wall_fragment(wall_surface, openings, wall_frag_id):
             z_val = float(p[2])
             p_xy  = wall_depth * n2d + t_val * txy
             proj_pts.append((float(p_xy[0]), float(p_xy[1]), z_val))
-        ext_poslist = ' '.join(
-            f'{x:.6f} {y:.6f} {z:.6f}' for x, y, z in proj_pts)
+        ext_poslist = ' '.join(f'{x:.6f} {y:.6f} {z:.6f}' for x, y, z in proj_pts)
     else:
-        # Fallback: use raw coords as-is
-        ext_poslist = ' '.join(
-            f'{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}' for p in raw_coords)
+        ext_poslist = ' '.join(f'{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}' for p in raw_coords)
 
-    # ── Interior rings (holes, inset by HOLE_PAD) ─────────────────────
     interior_strs = []
+    opening_strs = []
+
     for proj_dict, ftype, gml_id in openings:
         if not proj_dict:
             continue
-        ring = proj_dict['ring']   # CCW rectangle, 5 pts (closed)
-        # The ring is [BL, BR, TR, TL, BL]; extract the 4 unique corners
-        # and inset in the tangent/Z directions.
+        
+        ring    = proj_dict['ring']
         n2d_h   = proj_dict['n2d']
         txy_h   = proj_dict['txy']
         wd_h    = proj_dict['wall_depth']
         pad     = HOLE_PAD
 
-        # Re-derive t/z bounds from the opening ring
-        body  = ring[:-1]   # [BL, BR, TR, TL]
+        body  = ring[:-1]
         t_vals = [float(pt[:2] @ txy_h) for pt in [(p[0], p[1], 0) for p in body]]
         z_vals = [pt[2] for pt in body]
         t_lo = min(t_vals) + pad
@@ -480,46 +470,66 @@ def build_lod3_wall_fragment(wall_surface, openings, wall_frag_id):
         z_hi = max(z_vals) - pad
 
         if t_hi <= t_lo or z_hi <= z_lo:
-            # Hole too small to inset — use original ring without padding
-            t_lo = min(t_vals)
-            t_hi = max(t_vals)
-            z_lo = min(z_vals)
-            z_hi = max(z_vals)
+            t_lo, t_hi = min(t_vals), max(t_vals)
+            z_lo, z_hi = min(z_vals), max(z_vals)
 
         def hwpt(t, z):
             p_xy = wd_h * n2d_h + t * txy_h
             return (float(p_xy[0]), float(p_xy[1]), float(z))
 
-        # Interior ring = CW (reversed from the CCW exterior order)
-        # CCW order: BL→BR→TR→TL  →  CW (hole): TL→TR→BR→BL
-        hole_body = [
-            hwpt(t_lo, z_hi),   # TL
-            hwpt(t_hi, z_hi),   # TR
-            hwpt(t_hi, z_lo),   # BR
-            hwpt(t_lo, z_lo),   # BL
-        ]
-        hole_ring = hole_body + [hole_body[0]]  # close
+        # CW Hole Ring (for gml:interior)
+        hole_body = [hwpt(t_lo, z_hi), hwpt(t_hi, z_hi), hwpt(t_hi, z_lo), hwpt(t_lo, z_lo)]
+        hole_ring = hole_body + [hole_body[0]]
         hole_pl = ' '.join(f'{x:.6f} {y:.6f} {z:.6f}' for x, y, z in hole_ring)
+        
         interior_strs.append(
             f'                  <gml:interior>\n'
             f'                    <gml:LinearRing>\n'
-            f'                      <gml:posList srsDimension="3">'
-            f'{hole_pl}</gml:posList>\n'
+            f'                      <gml:posList srsDimension="3">{hole_pl}</gml:posList>\n'
             f'                    </gml:LinearRing>\n'
             f'                  </gml:interior>'
         )
 
-    interior_block = ('\n' + '\n'.join(interior_strs)) if interior_strs else ''
+        # CCW Window Ring (using the exact same padded bounds to eliminate Z-fighting)
+        window_body = [hwpt(t_lo, z_lo), hwpt(t_hi, z_lo), hwpt(t_hi, z_hi), hwpt(t_lo, z_hi)]
+        window_ring = window_body + [window_body[0]]
+        window_pl = ' '.join(f'{x:.6f} {y:.6f} {z:.6f}' for x, y, z in window_ring)
 
-    # ── LOD3 wall polygon (exterior + holes) ───────────────────────
+        face_str = (
+            f'              <gml:MultiSurface>\n'
+            f'                <gml:surfaceMember>\n'
+            f'                  <gml:Polygon gml:id="{gml_id}_face">\n'
+            f'                    <gml:exterior>\n'
+            f'                      <gml:LinearRing>\n'
+            f'                        <gml:posList srsDimension="3">{window_pl}</gml:posList>\n'
+            f'                      </gml:LinearRing>\n'
+            f'                    </gml:exterior>\n'
+            f'                  </gml:Polygon>\n'
+            f'                </gml:surfaceMember>\n'
+            f'              </gml:MultiSurface>'
+        )
+        
+        tag = "Window" if ftype == "window" else "Door"
+        opening_strs.append(
+            f'        <bldg:opening>\n'
+            f'          <bldg:{tag} gml:id="{gml_id}">\n'
+            f'            <bldg:lod3MultiSurface>\n'
+            f'{face_str}\n'
+            f'            </bldg:lod3MultiSurface>\n'
+            f'          </bldg:{tag}>\n'
+            f'        </bldg:opening>'
+        )
+
+    interior_block = ('\n' + '\n'.join(interior_strs)) if interior_strs else ''
+    openings_block = ('\n' + '\n'.join(opening_strs)) if opening_strs else ''
+
     wall_poly_str = (
         f'          <gml:MultiSurface>\n'
         f'            <gml:surfaceMember>\n'
         f'              <gml:Polygon gml:id="{wall_frag_id}_poly">\n'
         f'                <gml:exterior>\n'
         f'                  <gml:LinearRing>\n'
-        f'                    <gml:posList srsDimension="3">'
-        f'{ext_poslist}</gml:posList>\n'
+        f'                    <gml:posList srsDimension="3">{ext_poslist}</gml:posList>\n'
         f'                  </gml:LinearRing>\n'
         f'                </gml:exterior>'
         f'{interior_block}\n'
@@ -528,52 +538,6 @@ def build_lod3_wall_fragment(wall_surface, openings, wall_frag_id):
         f'          </gml:MultiSurface>'
     )
 
-    # ── Opening elements (un-inset ring = exact fit) ──────────────────
-    opening_strs = []
-    for proj_dict, ftype, gml_id in openings:
-        if not proj_dict:
-            continue
-        ring = proj_dict['ring']
-        poslist = ' '.join(f'{x:.6f} {y:.6f} {z:.6f}' for x, y, z in ring)
-        face_str = (
-            f'              <gml:MultiSurface>\n'
-            f'                <gml:surfaceMember>\n'
-            f'                  <gml:Polygon gml:id="{gml_id}_face">\n'
-            f'                    <gml:exterior>\n'
-            f'                      <gml:LinearRing>\n'
-            f'                        <gml:posList srsDimension="3">'
-            f'{poslist}</gml:posList>\n'
-            f'                      </gml:LinearRing>\n'
-            f'                    </gml:exterior>\n'
-            f'                  </gml:Polygon>\n'
-            f'                </gml:surfaceMember>\n'
-            f'              </gml:MultiSurface>'
-        )
-        if ftype == 'window':
-            op = (
-                f'        <bldg:opening>\n'
-                f'          <bldg:Window gml:id="{gml_id}">\n'
-                f'            <bldg:lod3MultiSurface>\n'
-                f'{face_str}\n'
-                f'            </bldg:lod3MultiSurface>\n'
-                f'          </bldg:Window>\n'
-                f'        </bldg:opening>'
-            )
-        else:  # door
-            op = (
-                f'        <bldg:opening>\n'
-                f'          <bldg:Door gml:id="{gml_id}">\n'
-                f'            <bldg:lod3MultiSurface>\n'
-                f'{face_str}\n'
-                f'            </bldg:lod3MultiSurface>\n'
-                f'          </bldg:Door>\n'
-                f'        </bldg:opening>'
-            )
-        opening_strs.append(op)
-
-    openings_block = ('\n' + '\n'.join(opening_strs)) if opening_strs else ''
-
-    # ── Full WallSurface fragment ─────────────────────────────────
     return (
         f'    <bldg:boundedBy>\n'
         f'      <bldg:WallSurface gml:id="{wall_frag_id}">\n'
@@ -584,7 +548,6 @@ def build_lod3_wall_fragment(wall_surface, openings, wall_frag_id):
         f'      </bldg:WallSurface>\n'
         f'    </bldg:boundedBy>'
     )
-
 
 def create_bbox_polygons(points, wall_normal=None):
     """
@@ -826,25 +789,21 @@ def _wall_coplanar_with_any(coords, wall_opening_map,
 def collect_passthrough_surfaces(gml_path, wall_opening_map):
     """
     Read the original GML file and return verbatim XML string fragments for
-    every <*:boundedBy> block that must be preserved in the LOD3 output:
+    every <*:boundedBy> block that must be preserved in the LOD3 output.
 
-    * **RoofSurfaces** — always included unchanged.
-    * **WallSurfaces** that are NOT geometrically co-planar with any of the
-      walls in *wall_opening_map* — i.e. walls that lie on a different facade
-      plane and are therefore unaffected by the LOD3 hole-punching operation.
-
-    Walls that share the same plane as a replaced wall are excluded even if
-    their ``gml:id`` is different.  This prevents visually overlapping faces
-    from appearing in the output file.
-
-    The extraction is purely text-based (no XML re-serialisation) so the
-    original formatting and namespace prefixes are preserved verbatim.
-
-    Returns a list of XML string fragments (each is a stripped, complete
-    ``<*:boundedBy> … </*:boundedBy>`` block).
+    This has been rewritten to STRICTLY filter by gml:id, permanently killing
+    "zombie walls" by ensuring any wall marked for LOD3 replacement is never
+    passed through.
     """
     with open(gml_path, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # 1. Extract the exact gml:ids of the walls we are replacing
+    replaced_wall_ids = set()
+    for data in wall_opening_map.values():
+        orig_id = data['wall'].get('gml_id')
+        if orig_id:
+            replaced_wall_ids.add(orig_id)
 
     # Namespace-agnostic patterns
     block_pat = re.compile(
@@ -853,11 +812,16 @@ def collect_passthrough_surfaces(gml_path, wall_opening_map):
         r'[ \t]*',
         re.DOTALL,
     )
-    roof_pat = re.compile(r'<(?:[^\s:<>]+:)?RoofSurface[\s>]')
-    wall_pat = re.compile(r'<(?:[^\s:<>]+:)?WallSurface[\s>]')
+    roof_pat   = re.compile(r'<(?:[^\s:<>]+:)?RoofSurface[\s>]')
+    wall_pat   = re.compile(r'<(?:[^\s:<>]+:)?WallSurface[\s>]')
+    ground_pat = re.compile(r'<(?:[^\s:<>]+:)?GroundSurface[\s>]')
+
+    # Pattern to extract any ID attribute flexibly (gml:id or id)
+    id_pat = re.compile(r'(?:gml:)?id="([^"]+)"')
 
     passthrough = []
     n_roofs   = 0
+    n_ground  = 0
     n_walls   = 0
     n_skipped = 0
 
@@ -870,7 +834,13 @@ def collect_passthrough_surfaces(gml_path, wall_opening_map):
             n_roofs += 1
             continue
 
-        # ── WallSurface: geometric co-planarity filter ──────────────────
+        # ── GroundSurface: always carry through ───────────────────────
+        if ground_pat.search(block):
+            passthrough.append(block)
+            n_ground += 1
+            continue
+
+        # ── WallSurface: Strict ID-based filter ───────────────────────
         if wall_pat.search(block):
             if not wall_opening_map:
                 # No openings at all — keep all walls
@@ -878,105 +848,109 @@ def collect_passthrough_surfaces(gml_path, wall_opening_map):
                 n_walls += 1
                 continue
 
-            coords = _parse_pos_list(block)
-            if coords is None:
-                # Cannot parse — keep it to avoid silent data loss
-                passthrough.append(block)
-                n_walls += 1
-                continue
+            # Extract all IDs present in this XML block
+            block_ids = id_pat.findall(block)
 
-            if _wall_coplanar_with_any(coords, wall_opening_map):
-                n_skipped += 1          # on the same face as a LOD3 wall
+            # Check if this block contains the ID of a wall we already replaced
+            is_zombie = any(bid in replaced_wall_ids for bid in block_ids)
+
+            if is_zombie:
+                # Zombie wall detected! Skip it so it stays dead.
+                n_skipped += 1
             else:
+                # It's an unaffected wall, safe to pass through.
                 passthrough.append(block)
                 n_walls += 1
 
     print(f"  Passthrough: {n_roofs} RoofSurface(s), "
+          f"{n_ground} GroundSurface(s), "
           f"{n_walls} unmodified WallSurface(s) "
-          f"({n_skipped} co-planar wall(s) excluded).")
+          f"({n_skipped} replaced wall(s) cleanly killed).")
     return passthrough
 
 
 # =====================================================================
-# Append features to existing GML file
+# Append features to existing GML file  (pure-string, namespace-safe)
 # =====================================================================
-def append_to_gml(gml_path, gml_fragments, output_path,
-                  strip_wall_ids=None):
+def append_to_gml(gml_path, gml_fragments, output_path, strip_wall_ids=None):
     """
-    Insert *gml_fragments* before the closing building tag.
+    String-only implementation that preserves every namespace prefix exactly
+    as written in the source file (no ElementTree re-serialisation, which would
+    mangle all prefixes and make the file unreadable by CityGML viewers).
+
+    Steps
+    -----
+    1. Read raw source GML text.
+    2. Temporarily replace all <boundedBy> blocks with numbered placeholders
+       so that the global-shell stripper cannot touch nested lod2MultiSurface
+       geometry (which is the actual polygon data of each individual surface).
+    3. Strip LOD2 global-level lod2Solid / lod2MultiSurface shells from the
+       skeletal text (now safe because boundedBy content is protected).
+    4. Restore the placeholders, filtering out replaced WallSurface blocks.
+    5. Insert the new LOD3 fragments immediately before the last
+       </bldg:Building> closing tag (using last, not first, to handle files
+       that contain nested BuildingPart elements).
     """
-    with open(gml_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    with open(gml_path, 'r', encoding='utf-8') as fh:
+        content = fh.read()
 
-    # ── Step 1: strip individual LOD2 WallSurface blocks ─────────────
-    if strip_wall_ids:
-        for wid in strip_wall_ids:
-            if not wid:
-                continue
-            pattern = (
-                r'[ \t]*<(?:[^\s:<>]+:)?boundedBy[^>]*>\s*'
-                r'<(?:[^\s:<>]+:)?WallSurface[^>]*'
-                + re.escape(wid) +
-                r'[^>]*>.*?</(?:[^\s:<>]+:)?WallSurface>\s*'
-                r'</(?:[^\s:<>]+:)?boundedBy>[ \t]*(\r?\n)?'
-            )
-            content, n_removed = re.subn(
-                pattern, '', content, flags=re.DOTALL)
-            if n_removed:
-                print(f"    Stripped {n_removed} original LOD2 WallSurface "
-                      f"block(s) for id='{wid}'.")
+    # ── 1. Pull out all <boundedBy> blocks → placeholders ─────────────
+    bounded_full_pat = re.compile(
+        r'<(?:[^\s:<>]+:)?boundedBy[^>]*>.*?</(?:[^\s:<>]+:)?boundedBy>',
+        re.DOTALL)
+    protected_blocks = []
 
-    # ── Step 1.5: Extract and remove GroundSurfaces (MANUAL APPEND) ──
-    # Pull the GroundSurfaces out of the firing line before the greedy 
-    # regex runs, and delete them from the top of the file to prevent 
-    # empty duplicate tags.
-    ground_pattern = (
-        r'[ \t]*<(?:[^\s:<>]+:)?boundedBy[^>]*>\s*'
-        r'<(?:[^\s:<>]+:)?GroundSurface.*?'
-        r'</(?:[^\s:<>]+:)?GroundSurface>\s*'
-        r'</(?:[^\s:<>]+:)?boundedBy>[ \t]*(\r?\n)?'
-    )
-    extracted_grounds = []
-    for match in re.finditer(ground_pattern, content, flags=re.DOTALL):
-        extracted_grounds.append(match.group(0).strip())
-        
-    content, n_grounds = re.subn(ground_pattern, '', content, flags=re.DOTALL)
-    if n_grounds:
-        print(f"    Extracted {n_grounds} GroundSurface(s) for manual re-appending.")
+    def _protect(m):
+        idx = len(protected_blocks)
+        protected_blocks.append(m.group(0))
+        return f'__BB_{idx}__'
 
-    # ── Step 2: strip LOD2 continuous geometric shells (GREEDY) ──────
-    lod2_shell_patterns = [
-        r'[ \t]*<(?:[^\s:<>]+:)?lod2Solid[^>]*>.*?</(?:[^\s:<>]+:)?lod2Solid>[ \t]*(\r?\n)?',
-        r'[ \t]*<(?:[^\s:<>]+:)?lod2MultiSurface[^>]*>.*?</(?:[^\s:<>]+:)?lod2MultiSurface>[ \t]*(\r?\n)?',
-    ]
-    n_shells = 0
-    for pat in lod2_shell_patterns:
-        content, n = re.subn(pat, '', content, flags=re.DOTALL)
-        n_shells += n
+    content = bounded_full_pat.sub(_protect, content)
+
+    # ── 2. Strip global LOD2 geometric shells (now safe) ──────────────
+    shell_pat = re.compile(
+        r'[ \t]*<(?:[^\s:<>]+:)?(?:lod2Solid|lod2MultiSurface)[^>]*>.*?'
+        r'</(?:[^\s:<>]+:)?(?:lod2Solid|lod2MultiSurface)>[ \t]*\n?',
+        re.DOTALL)
+    n_shells = len(shell_pat.findall(content))
+    content  = shell_pat.sub('', content)
     if n_shells:
-        print(f"    Removed {n_shells} LOD2 geometric shell block(s) (greedy).")
+        print(f"    Removed {n_shells} LOD2 global geometric shell block(s).")
 
-    # ── Find insertion point ─────────────────────────────────────────
-    marker = '</bldg:Building>'
-    pos = content.rfind(marker)
-    if pos == -1:
-        m = re.search(r'</(?:[^\s:<>]+:)?Building>', content)
-        if m:
-            pos = m.start()
-        else:
-            print("  ERROR: Could not find closing Building tag in GML file.")
-            return False
+    # ── 3. Restore placeholders, filtering replaced WallSurfaces ──────
+    id_pat_local = re.compile(r'(?:gml:)?id="([^"]+)"')
+    ws_pat_local = re.compile(r'<(?:[^\s:<>]+:)?WallSurface[\s>]')
+    n_removed = 0
 
-    # ── Append extracted GroundSurfaces at the very end ──────────────
-    if extracted_grounds:
-        gml_fragments.extend(extracted_grounds)
+    def _restore(m):
+        nonlocal n_removed
+        block = protected_blocks[int(m.group(1))]
+        if strip_wall_ids and ws_pat_local.search(block):
+            ids_in_block = set(id_pat_local.findall(block))
+            if ids_in_block & strip_wall_ids:
+                n_removed += 1
+                return ''      # replaced wall → delete
+        return block           # keep everything else
 
-    insertion = "\n" + "\n".join(gml_fragments) + "\n  "
-    new_content = content[:pos] + insertion + content[pos:]
+    content = re.sub(r'__BB_(\d+)__', _restore, content)
+    if n_removed:
+        print(f"    Stripped {n_removed} original LOD2 WallSurface block(s).")
+
+    # ── 4. Insert new fragments before the LAST </bldg:Building> tag ──
+    # Using rfind-equivalent so nested BuildingPart closing tags are skipped.
+    all_close = list(re.finditer(r'</(?:[^\s:<>]+:)?Building>', content))
+    if not all_close:
+        print("  ERROR: Could not locate closing Building tag in GML.")
+        return False
+    close_bldg   = all_close[-1]   # last occurrence = outermost Building
+    insert_pos   = close_bldg.start()
+    insertion    = "\n" + "\n".join(gml_fragments) + "\n"
+    content      = content[:insert_pos] + insertion + content[insert_pos:]
 
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(new_content)
+    with open(output_path, 'w', encoding='utf-8') as fh:
+        fh.write(content)
+
     return True
 
 
@@ -1073,25 +1047,43 @@ def main():
 
             gml_id = f"{ftype}_{feat_counter}_{uuid.uuid4().hex[:8]}"
 
-            # ── Window / Door: project onto wall plane ────────────────
-            if matched_wall is not None and ftype in ('window', 'door'):
-                proj = compute_wall_projection(feat['points'], matched_wall)
-                if proj:
-                    widx = matched_wall['idx']
-                    if widx not in wall_opening_map:
-                        wall_opening_map[widx] = {
-                            'wall': matched_wall, 'openings': []}
-                    wall_opening_map[widx]['openings'].append(
-                        (proj, ftype, gml_id))
-                    summary[ftype] = summary.get(ftype, 0) + 1
-                    wall_angle = np.degrees(np.arctan2(
-                        matched_wall['normal_2d'][1],
-                        matched_wall['normal_2d'][0]))
-                    print(f"→ projected onto wall {widx} "
-                          f"(angle={wall_angle:+.1f}°)")
-                    continue   # skip bbox fallback
+            # ── Window / Door: ALWAYS project as flat plane on a wall ──
+            if ftype in ('window', 'door'):
+                # Prefer the spatially matched wall; fall back to nearest.
+                wall_for_proj = matched_wall
+                if wall_for_proj is None and wall_surfaces:
+                    wall_for_proj = find_nearest_wall(feat['points'],
+                                                      wall_surfaces)
+                    if wall_for_proj is not None:
+                        wa = np.degrees(np.arctan2(
+                            wall_for_proj['normal_2d'][1],
+                            wall_for_proj['normal_2d'][0]))
+                        print(f"[nearest-wall fallback → wall "
+                              f"{wall_for_proj['idx']}, "
+                              f"angle={wa:+.1f}°] ", end="")
+
+                if wall_for_proj is not None:
+                    proj = compute_wall_projection(feat['points'],
+                                                   wall_for_proj)
+                    if proj:
+                        widx = wall_for_proj['idx']
+                        if widx not in wall_opening_map:
+                            wall_opening_map[widx] = {
+                                'wall': wall_for_proj, 'openings': []}
+                        wall_opening_map[widx]['openings'].append(
+                            (proj, ftype, gml_id))
+                        summary[ftype] = summary.get(ftype, 0) + 1
+                        wall_angle = np.degrees(np.arctan2(
+                            wall_for_proj['normal_2d'][1],
+                            wall_for_proj['normal_2d'][0]))
+                        print(f"→ projected onto wall {widx} "
+                              f"(angle={wall_angle:+.1f}°)")
+                        continue   # skip bbox fallback
+                    else:
+                        print("[projection degenerate, bbox fallback] ",
+                              end="")
                 else:
-                    print("[projection degenerate, bbox fallback] ", end="")
+                    print("[no wall found, bbox fallback] ", end="")
 
             # ── Installation / unmatched / degenerate projection: bbox ──
             polygons = create_bbox_polygons(feat['points'], wall_normal=wall_n)
@@ -1132,19 +1124,16 @@ def main():
     # 2. Fallback fragments (installations, unmatched clusters).
     gml_fragments.extend(fallback_fragments)
 
-    # 3. Passthrough: RoofSurfaces + WallSurfaces with no openings.
-    #    These are re-emitted verbatim from the source GML so they are not
-    #    lost when the lod2Solid / lod2MultiSurface shells are stripped.
-    print(f"\n  Collecting passthrough surfaces from "
-          f"{os.path.basename(gml_path)} ...")
-    passthrough = collect_passthrough_surfaces(gml_path, wall_opening_map)
-    gml_fragments.extend(passthrough)
+    # 3. Passthrough surfaces (Roofs, GroundSurface, unmodified Walls) are
+    #    preserved automatically by the string-based append_to_gml, which
+    #    only strips the specific replaced walls from the original file text
+    #    and leaves all other <boundedBy> blocks intact.
 
     if not gml_fragments:
         print("\n  No features created. Nothing to append.")
         return
 
-    # ── 4. Summary ───────────────────────────────────────────────
+    # ── 4. Summary ──────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  FEATURE SUMMARY")
     print(f"{'='*60}")
@@ -1152,12 +1141,10 @@ def main():
         citygml = {"window": "bldg:Window",
                    "door":   "bldg:Door"}.get(ftype, "bldg:BuildingInstallation")
         print(f"    {ftype:12s} → {citygml:30s} × {count}")
-    n_wall_frags  = len(wall_opening_map)
-    n_fallback    = len(fallback_fragments)
-    n_passthrough = len(passthrough)
+    n_wall_frags = len(wall_opening_map)
+    n_fallback   = len(fallback_fragments)
     print(f"    {'LOD3 walls':12s}   {'(WallSurface+openings)':30s}   {n_wall_frags}")
     print(f"    {'bbox fallbk':12s}   {'(bbox / installation)':30s}   {n_fallback}")
-    print(f"    {'passthrough':12s}   {'(roofs + plain walls)':30s}   {n_passthrough}")
     print(f"    {'Total frags':12s}   {' ':30s}   {len(gml_fragments)}")
     if strip_wall_ids:
         print(f"    Stripping {len(strip_wall_ids)} original LOD2 wall block(s).")

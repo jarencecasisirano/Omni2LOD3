@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CityJSON LOD3: Facade Extrusions (BuildingInstallations).
+CityJSON LOD3: Facade Extrusions — Convex Hull (BuildingInstallations).
 
 Takes a CityJSON LOD3 file and a user-selected .las point cloud from
 outputs/11B_flat.
@@ -13,26 +13,26 @@ Pipeline
 4. For each cluster:
       a. Find the nearest wall surface for axis alignment.
       b. Project ALL cluster points onto the wall outward-normal axis.
-      c. Clip the bounding box at the wall plane:
-           • Near face  – snapped flush to the wall plane (the portion
-             of the box inside the building is discarded).
-           • Far face   – outermost point along +normal.
-           • Width / height – tangent / Z extents of all cluster points.
-      d. If no points protrude outward from the wall, skip the cluster.
-      e. Append a BuildingInstallation child with all 6 box faces.
+      c. Filter to exterior points (d ≥ d_wall) — interior portion discarded.
+      d. If none protrude outward, skip the cluster.
+      e. Compute the 3-D convex hull of the exterior points.
+      f. Add a planar back-wall cap polygon at d_wall that closes the hull
+         against the building facade.
+      g. Append a BuildingInstallation MultiSurface with the hull faces.
 5. Save the enriched CityJSON.
 
 Usage
 -----
     conda activate las-env
-    python scripts/LOD2toLOD3/11B_extrusions.py [-o OUTPUT]
+    python scripts/LOD2toLOD3/11B_extrusions_CH.py [-o OUTPUT]
 
 Options
 -------
     --eps              DBSCAN neighbourhood radius   (default 0.3 m)
     --min_samples      DBSCAN minimum cluster size   (default 30)
     --min_protrusion   Min outward protrusion to keep (default 0.01 m)
-    --output, -o       Output filename (in outputs/14_extrusions_json/).
+    --min_hull_pts     Min exterior points for hull   (default 4)
+    --output, -o       Output filename (in outputs/15_extrusions_ch_json/).
 """
 
 import os
@@ -45,6 +45,7 @@ import argparse
 import numpy as np
 import laspy
 from sklearn.cluster import DBSCAN
+from scipy.spatial import ConvexHull
 
 try:
     from shapely.geometry import MultiPoint, Polygon as SPolygon, Point
@@ -471,65 +472,156 @@ def make_extrusion_bbox(clip_info):
 
 
 # =====================================================================
-# Build all 6 face boundaries for a bbox extrusion
+# Convex-hull geometry builder
 # =====================================================================
-#
-# Corner layout (n = outward normal axis, t = tangent axis, Z = vertical):
-#   0 = (d_wall, t_lo, z_lo)   near-bottom-left
-#   1 = (d_out,  t_lo, z_lo)   far-bottom-left
-#   2 = (d_out,  t_hi, z_lo)   far-bottom-right
-#   3 = (d_wall, t_hi, z_lo)   near-bottom-right
-#   4 = (d_wall, t_lo, z_hi)   near-top-left
-#   5 = (d_out,  t_lo, z_hi)   far-top-left
-#   6 = (d_out,  t_hi, z_hi)   far-top-right
-#   7 = (d_wall, t_hi, z_hi)   near-top-right
-#
-# Outward normals (verified with Newell / right-hand rule):
-#   Bottom  [0,3,2,1]  → −Z
-#   Top     [4,5,6,7]  → +Z
-#   Far     [1,2,6,5]  → +n  (front face, away from building)
-#   Near    [0,4,7,3]  → −n  (back face, against building wall)
-#   Left    [0,1,5,4]  → −t
-#   Right   [3,7,6,2]  → +t
-#
-_EXTRUSION_FACE_IDX = [
-    [0, 3, 2, 1],   # bottom – normal −Z
-    [4, 5, 6, 7],   # top    – normal +Z
-    [1, 2, 6, 5],   # far    – normal +n (outward front face)
-    [0, 4, 7, 3],   # near   – normal −n (against wall)
-    [0, 1, 5, 4],   # left   – normal −t
-    [3, 7, 6, 2],   # right  – normal +t
-]
-
-_FACE_SEMANTICS = [
-    "GroundSurface",  # bottom
-    "RoofSurface",    # top
-    "WallSurface",    # far (front)
-    "WallSurface",    # near (back, against building)
-    "WallSurface",    # left
-    "WallSurface",    # right
-]
-
-
-def build_extrusion_boundaries(bbox, int_verts, scale, translate):
+def get_exterior_points(cluster_pts, wall_surface):
     """
-    Encode the 8 bbox corners into int_verts and return CityJSON
-    polygon boundary specs for all 6 faces.
+    Return (exterior_pts, n2d, txy, d_wall, d_out, protrusion_m) for the
+    subset of cluster points that protrude outward from the wall plane,
+    or None if no such points exist.
     """
-    corners = bbox["corners"]
-    start   = len(int_verts)
-    for c in corners:
-        int_verts.append(encode_vertex(c, scale, translate))
-    idx = list(range(start, start + 8))
-    return [[[idx[i] for i in face]] for face in _EXTRUSION_FACE_IDX]
+    n2d    = wall_surface["normal_2d"]
+    d_wall = wall_surface["wall_d"]
+
+    # Build tangent axis
+    z_up    = np.array([0.0, 0.0, 1.0])
+    n3      = np.array([n2d[0], n2d[1], 0.0])
+    n3     /= np.linalg.norm(n3)
+    tangent = np.cross(z_up, n3)
+    tn      = np.linalg.norm(tangent)
+    tangent = tangent / tn if tn > 1e-9 else np.array([1.0, 0.0, 0.0])
+    txy     = tangent[:2]
+
+    pt_d  = cluster_pts[:, :2] @ n2d
+    d_out = float(pt_d.max())
+
+    if d_out <= d_wall:
+        return None   # entirely inside
+
+    ext_mask = pt_d >= d_wall
+    ext_pts  = cluster_pts[ext_mask]
+
+    return ext_pts, n2d, txy, d_wall, d_out, d_out - d_wall
+
+
+def build_convex_hull_geometry(ext_pts, n2d, d_wall, int_verts, scale, translate):
+    """
+    Build CityJSON polygon boundaries for a BuildingInstallation using the
+    3-D convex hull of the exterior cluster points, with a planar back-wall
+    cap polygon added at d_wall to seal the hull against the building facade.
+
+    Returns (boundaries, face_semantics) where:
+      - boundaries     : list of CityJSON polygon specs [[[ vi, ... ]]]
+      - face_semantics : list of semantic type strings (one per polygon)
+
+    Returns (None, None) if the convex hull cannot be computed.
+    """
+    if len(ext_pts) < 4:
+        return None, None
+
+    try:
+        hull = ConvexHull(ext_pts)
+    except Exception:
+        return None, None
+
+    # ── Hull faces (triangles) ───────────────────────────────────────
+    # Discard any simplex whose outward normal points INWARD (toward the
+    # building, i.e. dot(normal, n2d) < 0).  These are the back face(s)
+    # that will be replaced by our planar cap.
+    boundaries     = []
+    face_semantics = []
+
+    for simplex in hull.simplices:
+        verts_tri = ext_pts[simplex]   # 3 × 3
+        # Newell normal for winding consistency
+        e1 = verts_tri[1] - verts_tri[0]
+        e2 = verts_tri[2] - verts_tri[0]
+        tri_n = np.cross(e1, e2)
+        tri_n_len = np.linalg.norm(tri_n)
+        if tri_n_len < 1e-12:
+            continue
+        tri_n /= tri_n_len
+
+        # Skip back-facing triangles (they face into the building wall)
+        if float(np.dot(tri_n[:2], n2d)) < -0.1:
+            continue
+
+        # Encode triangle vertices
+        start = len(int_verts)
+        for v in verts_tri:
+            int_verts.append(encode_vertex(v, scale, translate))
+        boundaries.append([[start, start + 1, start + 2]])
+        face_semantics.append("WallSurface")
+
+    # ── Back-wall cap at d = d_wall ───────────────────────────────────
+    # Project exterior points onto the wall plane (fix depth = d_wall)
+    # and compute their 2-D convex hull to form a planar polygon cap.
+    wall_pts_xy = []
+    for p in ext_pts:
+        # Keep only points very close to the wall plane
+        d_p = float(p[:2] @ n2d)
+        if d_p - d_wall < 0.2:   # within 20 cm of wall plane
+            wall_pts_xy.append((d_p, p[2]))  # (depth, z) for 2-D hull
+
+    # Use ALL exterior points projected onto the wall plane
+    cap_2d = []
+    for p in ext_pts:
+        # Tangent component (horizontal along wall)
+        z_up    = np.array([0.0, 0.0, 1.0])
+        n3      = np.array([n2d[0], n2d[1], 0.0])
+        n3     /= np.linalg.norm(n3)
+        tang    = np.cross(z_up, n3)
+        tn      = np.linalg.norm(tang)
+        tang    = tang / tn if tn > 1e-9 else np.array([1.0, 0.0, 0.0])
+        txy     = tang[:2]
+        t_coord = float(p[:2] @ txy)
+        cap_2d.append((t_coord, float(p[2])))
+
+    cap_2d_arr = np.array(cap_2d)
+    if len(cap_2d_arr) >= 3:
+        try:
+            from shapely.geometry import MultiPoint as SMP
+            cap_hull_2d = SMP(cap_2d_arr.tolist()).convex_hull
+            cap_coords_2d = list(cap_hull_2d.exterior.coords)[:-1]  # drop repeated last
+
+            # Reconstruct 3-D wall-plane points from (t, z)
+            n3   = np.array([n2d[0], n2d[1], 0.0])
+            n3  /= np.linalg.norm(n3)
+            tang = np.cross(np.array([0.0, 0.0, 1.0]), n3)
+            tn   = np.linalg.norm(tang)
+            tang = tang / tn if tn > 1e-9 else np.array([1.0, 0.0, 0.0])
+            txy  = tang[:2]
+
+            cap_3d = []
+            for t_c, z_c in cap_coords_2d:
+                xy = d_wall * n2d + t_c * txy
+                cap_3d.append(np.array([float(xy[0]), float(xy[1]), float(z_c)]))
+
+            if len(cap_3d) >= 3:
+                # Reverse winding so normal points inward (toward building)
+                cap_3d = cap_3d[::-1]
+                start = len(int_verts)
+                for v in cap_3d:
+                    int_verts.append(encode_vertex(v, scale, translate))
+                idx = list(range(start, start + len(cap_3d)))
+                boundaries.append([idx])
+                face_semantics.append("WallSurface")
+        except Exception:
+            pass   # if shapely fails, omit the cap
+
+    if not boundaries:
+        return None, None
+
+    return boundaries, face_semantics
 
 
 # =====================================================================
 # Add BuildingInstallation CityObject
 # =====================================================================
-def add_installation(cm, install_id, parent_id, poly_boundaries):
+def add_installation(cm, install_id, parent_id, poly_boundaries, face_semantics):
     """
     Create a BuildingInstallation CityObject and link it to its parent.
+    face_semantics is a list of semantic type strings, one per polygon.
     """
     n = len(poly_boundaries)
     cm["CityObjects"][install_id] = {
@@ -540,7 +632,7 @@ def add_installation(cm, install_id, parent_id, poly_boundaries):
             "lod":        "3",
             "boundaries": poly_boundaries,
             "semantics": {
-                "surfaces": [{"type": _FACE_SEMANTICS[i]} for i in range(n)],
+                "surfaces": [{"type": face_semantics[i]} for i in range(n)],
                 "values":   list(range(n)),
             },
         }],
@@ -553,7 +645,7 @@ def add_installation(cm, install_id, parent_id, poly_boundaries):
 # =====================================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="CityJSON LOD3 — Facade Extrusions (BuildingInstallations)")
+        description="CityJSON LOD3 — Facade Extrusions, Convex Hull (BuildingInstallations)")
     parser.add_argument("--eps",            type=float, default=0.3,
                         help="DBSCAN eps radius (default 0.3 m)")
     parser.add_argument("--min_samples",    type=int,   default=30,
@@ -561,12 +653,15 @@ def main():
     parser.add_argument("--min_protrusion", type=float, default=0.01,
                         help="Minimum outward protrusion (m) to keep a cluster "
                              "(default 0.01 m)")
+    parser.add_argument("--min_hull_pts",   type=int,   default=4,
+                        help="Minimum exterior points needed to build a convex hull "
+                             "(default 4)")
     parser.add_argument("--output", "-o",  type=str,   default=None,
-                        help="Output filename (in outputs/14_extrusions_json/).")
+                        help="Output filename (in outputs/15_extrusions_ch_json/).")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  CityJSON LOD3: Facade Extrusions")
+    print("  CityJSON LOD3: Facade Extrusions (Convex Hull)")
     print("=" * 60)
 
     # ── 1. Select CityJSON ────────────────────────────────────────────
@@ -632,7 +727,7 @@ def main():
 
     # ── 6. Process each cluster ───────────────────────────────────────
     print(f"\n{'='*60}")
-    print("  PROCESSING CLUSTERS  (wall-clipped extrusions)")
+    print("  PROCESSING CLUSTERS  (convex hull extrusions)")
     print(f"{'='*60}")
 
     n_extruded = 0
@@ -677,35 +772,46 @@ def main():
         print(f"  Wall surface: angle={wall_angle:+.1f}°  "
               f"z=[{matched['z_min']:.2f}, {matched['z_max']:.2f}]")
 
-        # ── b. Clip bbox at wall plane (discard interior segment) ──────
-        clip = clip_bbox_at_wall(cluster_pts, matched)
+        # ── b. Extract exterior points (clip at wall plane) ─────────────
+        ext_result = get_exterior_points(cluster_pts, matched)
 
-        if clip is None:
+        if ext_result is None:
             print("  → SKIP: cluster lies entirely inside the building "
                   "(no outward protrusion).")
             n_skipped += 1
             continue
 
-        # ── c. Build extrusion bounding box ───────────────────────────
-        bbox = make_extrusion_bbox(clip)
+        ext_pts, n2d_m, txy_m, d_wall_m, d_out_m, protrusion_m = ext_result
 
-        p_m = bbox["protrusion_m"]
-        w_m = bbox["width_m"]
-        h_m = bbox["height_m"]
-
-        if p_m < args.min_protrusion or w_m < 0.01 or h_m < 0.01:
-            print(f"  → SKIP: degenerate bbox "
-                  f"({p_m:.3f}m × {w_m:.3f}m × {h_m:.3f}m).")
+        if protrusion_m < args.min_protrusion:
+            print(f"  → SKIP: protrusion {protrusion_m:.3f}m "
+                  f"< {args.min_protrusion:.3f}m threshold.")
             n_skipped += 1
             continue
 
-        print(f"  Extrusion bbox (clipped): protrusion={p_m:.3f}m  "
-              f"width={w_m:.3f}m  height={h_m:.3f}m")
+        if len(ext_pts) < args.min_hull_pts:
+            print(f"  → SKIP: only {len(ext_pts)} exterior point(s), "
+                  f"need ≥ {args.min_hull_pts} for convex hull.")
+            n_skipped += 1
+            continue
 
-        # ── d. Create BuildingInstallation with 6 faces ───────────────
-        feat_id    = f"extrusion_{cluster_idx}_{uuid.uuid4().hex[:8]}"
-        boundaries = build_extrusion_boundaries(bbox, int_verts, scale, translate)
-        add_installation(cm, feat_id, parent_id, boundaries)
+        # ── c. Build convex hull geometry ──────────────────────────────
+        boundaries, face_semantics = build_convex_hull_geometry(
+            ext_pts, matched["normal_2d"], matched["wall_d"],
+            int_verts, scale, translate
+        )
+
+        if boundaries is None:
+            print("  → SKIP: convex hull failed (degenerate point set).")
+            n_skipped += 1
+            continue
+
+        print(f"  Convex hull: protrusion={protrusion_m:.3f}m  "
+              f"{len(ext_pts):,} exterior pts  → {len(boundaries)} face(s)")
+
+        # ── d. Create BuildingInstallation ───────────────────────────────
+        feat_id = f"extrusion_{cluster_idx}_{uuid.uuid4().hex[:8]}"
+        add_installation(cm, feat_id, parent_id, boundaries, face_semantics)
 
         print(f"  → BuildingInstallation '{feat_id}' "
               f"({len(boundaries)} face(s))")

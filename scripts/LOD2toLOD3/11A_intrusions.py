@@ -68,8 +68,8 @@ except ImportError:
 
 # ─── Directories ──────────────────────────────────────────────────────────────
 LAS_DIR    = "outputs/11B_flat"
-JSON_DIR   = "outputs/13_openings_json"
-OUTPUT_DIR = "outputs/13_openings_json"
+JSON_DIR   = "outputs/12_openings_json"
+OUTPUT_DIR = "outputs/13_intrusions_json"
 
 # ─── Tuning constants ─────────────────────────────────────────────────────────
 VERTICAL_TOL  = 0.3    # |n_z / |n|| > this → near-horizontal, skip
@@ -133,7 +133,7 @@ def _flatten_indices(x):
 def extract_building_footprint(cm, world_verts):
     """
     Return a shapely Polygon for the building XY footprint.
-    Priority: GroundSurface semantic poly → XY convex hull fallback.
+    Properly handles nested CityJSON Solid semantic structures.
     """
     if not HAS_SHAPELY:
         return None
@@ -148,36 +148,40 @@ def extract_building_footprint(cm, world_verts):
             boundaries   = geom.get("boundaries", [])
             geom_type    = geom.get("type", "")
 
-            if geom_type not in ("Solid", "MultiSurface"):
+            if geom_type not in ("Solid", "MultiSurface") or not sem_values:
                 continue
 
-            flat = []
             if geom_type == "Solid":
-                offset = 0
-                for shell in boundaries:
+                for s_idx, shell in enumerate(boundaries):
                     for p_idx, polygon in enumerate(shell):
-                        flat.append((offset + p_idx, polygon))
-                    offset += len(shell)
-            else:
+                        try:
+                            sem_idx = sem_values[s_idx][p_idx]
+                            if sem_idx is not None:
+                                sem_type = sem_surfaces[sem_idx].get("type", "")
+                                if sem_type == "GroundSurface":
+                                    coords = world_verts[np.array(polygon[0])]
+                                    xy     = [(float(c[0]), float(c[1])) for c in coords]
+                                    poly   = make_valid(SPolygon(xy))
+                                    if not poly.is_empty and poly.area > 0:
+                                        print(f"  Footprint from GroundSurface: {poly.area:.1f} m²")
+                                        return poly
+                        except (IndexError, TypeError):
+                            continue
+            else:  # MultiSurface
                 for p_idx, polygon in enumerate(boundaries):
-                    flat.append((p_idx, polygon))
-
-            for global_p, polygon in flat:
-                try:
-                    sem_type = sem_surfaces[sem_values[global_p]].get("type", "")
-                except (IndexError, KeyError, TypeError):
-                    sem_type = ""
-                if sem_type != "GroundSurface":
-                    continue
-                try:
-                    coords = world_verts[np.array(polygon[0])]
-                    xy     = [(float(c[0]), float(c[1])) for c in coords]
-                    poly   = make_valid(SPolygon(xy))
-                    if not poly.is_empty and poly.area > 0:
-                        print(f"  Footprint from GroundSurface: {poly.area:.1f} m²")
-                        return poly
-                except Exception:
-                    pass
+                    try:
+                        sem_idx = sem_values[p_idx]
+                        if sem_idx is not None:
+                            sem_type = sem_surfaces[sem_idx].get("type", "")
+                            if sem_type == "GroundSurface":
+                                coords = world_verts[np.array(polygon[0])]
+                                xy     = [(float(c[0]), float(c[1])) for c in coords]
+                                poly   = make_valid(SPolygon(xy))
+                                if not poly.is_empty and poly.area > 0:
+                                    print(f"  Footprint from GroundSurface: {poly.area:.1f} m²")
+                                    return poly
+                    except (IndexError, TypeError):
+                        continue
 
     # Fallback: convex hull of all building vertices
     all_xy = []
@@ -197,7 +201,6 @@ def extract_building_footprint(cm, world_verts):
 
     print("  WARNING: could not determine building footprint.")
     return None
-
 
 # =====================================================================
 # Parse vertical wall surfaces
@@ -300,13 +303,10 @@ def _pca_normal_2d(points):
     return np.array([-tang[1], tang[0]])
 
 
-def find_nearest_surface(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
+def find_nearest_surface(points, vert_surfaces, outward_tol=2.0, inward_tol=10.0, z_expand=1.0):
     """
-    Match a cluster to a wall surface via 3 stages:
-      1. Spatial intersection (Z overlap + signed distance + XY footprint).
-      2. PCA normal alignment fallback.
-      3. Nearest centroid unconditional fallback.
-    Returns the matched surface dict or None.
+    Match a cluster to a wall surface, heavily weighted toward bounded spatial intersection
+    to prevent deep recesses from matching walls on the opposite side of the building.
     """
     if not vert_surfaces:
         return None
@@ -317,44 +317,44 @@ def find_nearest_surface(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
 
     best, best_d = None, float("inf")
 
-    # Stage 1
+    # Stage 1: Bounded spatial intersection (with asymmetric depth for intrusions)
     for vs in vert_surfaces:
         if z_hi < vs["z_min"] - z_expand or z_lo > vs["z_max"] + z_expand:
             continue
+            
         n2d = vs["normal_2d"]
         d   = float(np.dot(cxy - vs["origin_2d"], n2d))
-        if abs(d) >= dist_tol:
+        
+        # Positive d = outside wall, Negative d = recessed inside wall
+        if d > outward_tol or d < -inward_tol:
             continue
+            
         proj = cxy - d * n2d
-        pad  = dist_tol
+        pad  = 2.0  # Allow some horizontal XY overhang
         if (proj[0] < vs["xy_min"][0] - pad or proj[0] > vs["xy_max"][0] + pad or
                 proj[1] < vs["xy_min"][1] - pad or proj[1] > vs["xy_max"][1] + pad):
             continue
+            
         if abs(d) < best_d:
             best_d, best = abs(d), vs
 
     if best:
         return best
 
-    # Stage 2 – PCA normal alignment
-    pca_n = _pca_normal_2d(points)
-    if pca_n is not None:
-        best_dot = -1.0
-        for vs in vert_surfaces:
-            dot = abs(float(np.dot(pca_n, vs["normal_2d"])))
-            if dot > best_dot:
-                best_dot, best = dot, vs
-        if best:
-            return best
-
-    # Stage 3 – nearest centroid
+    # Stage 2: Nearest centroid WITH footprint constraint (prevent cross-building matches)
     for vs in vert_surfaces:
-        d = abs(float(np.dot(cxy - vs["origin_2d"], vs["normal_2d"])))
-        if d < best_d:
-            best_d, best = d, vs
+        n2d = vs["normal_2d"]
+        d = float(np.dot(cxy - vs["origin_2d"], n2d))
+        
+        # Strictly enforce front/back bounds
+        if d > outward_tol or d < -inward_tol:
+            continue
+            
+        dist_to_centroid = np.linalg.norm(cxy - vs["origin_2d"])
+        if dist_to_centroid < best_d:
+            best_d, best = dist_to_centroid, vs
 
     return best
-
 
 # =====================================================================
 # Interior-point filter (XY footprint containment test)
@@ -362,7 +362,7 @@ def find_nearest_surface(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
 def filter_interior_points(cluster_pts, prepared_fp):
     """
     Return a boolean mask of cluster_pts whose XY lies inside the
-    building footprint.  Uses Shapely's prepared geometry for speed.
+    (buffered) building footprint.  Uses Shapely's prepared geometry for speed.
     """
     if prepared_fp is None:
         # No footprint available — assume all points are interior
@@ -372,6 +372,26 @@ def filter_interior_points(cluster_pts, prepared_fp):
          for x, y in cluster_pts[:, :2]],
         dtype=bool
     )
+    return mask
+
+
+def filter_by_wall_proximity(cluster_pts, wall_surface, outward_tol=0.1, inward_tol=10.0):
+    """
+    Fallback interior filter based on depth relative to a wall plane.
+
+    A point is considered "interior" when its signed depth along the wall
+    outward normal satisfies:
+        -inward_tol <= d <= outward_tol
+
+    i.e. it is no more than `outward_tol` m in front of the wall face
+    and no deeper than `inward_tol` m into the building.
+    This handles clusters on any facade regardless of footprint shape.
+    """
+    n2d    = wall_surface["normal_2d"]
+    origin = wall_surface["origin_2d"]
+    # Depth along outward normal from the wall centroid
+    d = cluster_pts[:, :2] @ n2d - float(np.dot(origin, n2d))
+    mask = (d >= -inward_tol) & (d <= outward_tol)
     return mask
 
 
@@ -460,34 +480,45 @@ def make_recess_bbox(interior_pts, wall_surface):
 
 
 # =====================================================================
-# Punch a rectangular hole in the matched wall polygon
+# Punch a rectangular hole in ONE wall panel
 # =====================================================================
 def punch_wall_hole(cm, int_verts, scale, translate, surface, bbox):
     """
-    Add a CW interior ring to the matched wall polygon, creating the
-    visible opening of the recess.  The ring is inset by HOLE_PAD
-    metres on all sides.
+    Add a CW interior ring to a wall polygon, creating the visible opening
+    of the recess.
 
-    Wall-plane points are reconstructed from (d_open, t, z) local coords.
+    The hole dimensions are CLIPPED to the surface's own tangential and
+    vertical extent, so the ring always stays inside the panel boundary.
+    Returns None if there is no valid intersection with this panel.
     """
-    n2d   = bbox["n2d"]
-    txy   = bbox["txy"]
-    d     = bbox["d_open"]
-    pad   = HOLE_PAD
+    n2d  = bbox["n2d"]
+    txy  = bbox["txy"]
+    pad  = HOLE_PAD
 
-    t_lo_p = bbox["t_lo"] + pad;  t_hi_p = bbox["t_hi"] - pad
-    z_lo_p = bbox["z_lo"] + pad;  z_hi_p = bbox["z_hi"] - pad
+    # Clip recess extents to this wall panel's tangential bounds
+    vs_t  = surface["coords"][:, :2] @ txy
+    t_lo  = max(bbox["t_lo"], float(vs_t.min()))
+    t_hi  = min(bbox["t_hi"], float(vs_t.max()))
 
-    # Ensure hole isn't degenerate after padding
+    # Clip to panel's vertical bounds
+    z_lo  = max(bbox["z_lo"], surface["z_min"])
+    z_hi  = min(bbox["z_hi"], surface["z_max"])
+
+    # Apply inset and reject if degenerate
+    t_lo_p = t_lo + pad;  t_hi_p = t_hi - pad
+    z_lo_p = z_lo + pad;  z_hi_p = z_hi - pad
+
     if t_hi_p <= t_lo_p or z_hi_p <= z_lo_p:
-        t_lo_p, t_hi_p = bbox["t_lo"], bbox["t_hi"]
-        z_lo_p, z_hi_p = bbox["z_lo"], bbox["z_hi"]
+        return None   # hole doesn't fit inside this panel
+
+    # Use the PANEL's own wall-plane depth so the ring sits flush
+    d = surface["wall_d"]
 
     def wpt(t, z):
         xy = d * n2d + t * txy
         return (float(xy[0]), float(xy[1]), float(z))
 
-    # CW ring when viewed from outside the building (inward-facing hole)
+    # CW ring when viewed from outside the building
     hole_pts = [
         wpt(t_lo_p, z_hi_p),   # top-left
         wpt(t_hi_p, z_hi_p),   # top-right
@@ -516,6 +547,55 @@ def punch_wall_hole(cm, int_verts, scale, translate, surface, bbox):
     geom["lod"] = "3"
 
     return hole_indices
+
+
+# =====================================================================
+# Find every wall panel on the same facade plane that overlaps the recess
+# =====================================================================
+def find_all_overlapping_surfaces(vert_surfaces, bbox, matched,
+                                   normal_tol=0.80, depth_tol=0.30):
+    """
+    Return all wall surfaces that:
+      • Share the same facade orientation as `matched` (cos ≥ normal_tol).
+      • Lie on the same wall plane (|wall_d difference| ≤ depth_tol).
+      • Have a Z range that overlaps the recess opening [z_lo, z_hi].
+      • Have a tangential extent that overlaps the recess opening [t_lo, t_hi].
+
+    Parameters
+    ----------
+    normal_tol : float
+        Minimum cosine similarity between normals (default 0.95 ≈ 18°).
+    depth_tol : float
+        Max wall-plane depth difference allowed (metres, default 0.30).
+    """
+    n2d    = bbox["n2d"]
+    txy    = bbox["txy"]
+    t_lo   = bbox["t_lo"]
+    t_hi   = bbox["t_hi"]
+    z_lo   = bbox["z_lo"]
+    z_hi   = bbox["z_hi"]
+    wall_d = matched["wall_d"]
+
+    overlapping = []
+    for vs in vert_surfaces:
+        # Same facade direction
+        if float(np.dot(vs["normal_2d"], n2d)) < normal_tol:
+            continue
+        # Same wall-plane depth
+        if abs(vs["wall_d"] - wall_d) > depth_tol:
+            continue
+        # Vertical overlap
+        if vs["z_max"] < z_lo - 0.05 or vs["z_min"] > z_hi + 0.05:
+            continue
+        # Tangential overlap
+        vs_t    = vs["coords"][:, :2] @ txy
+        vs_t_lo = float(vs_t.min())
+        vs_t_hi = float(vs_t.max())
+        if vs_t_hi < t_lo - 0.05 or vs_t_lo > t_hi + 0.05:
+            continue
+        overlapping.append(vs)
+
+    return overlapping
 
 
 # =====================================================================
@@ -609,16 +689,20 @@ def add_installation(cm, install_id, parent_id, poly_boundaries):
 def main():
     parser = argparse.ArgumentParser(
         description="CityJSON LOD3 — Facade Recesses")
-    parser.add_argument("--eps",           type=float, default=0.3,
+    parser.add_argument("--eps",           type=float, default=1.0,
                         help="DBSCAN eps radius (default 0.3 m)")
-    parser.add_argument("--min_samples",   type=int,   default=30,
+    parser.add_argument("--min_samples",   type=int,   default=20,
                         help="DBSCAN min_samples (default 30)")
     parser.add_argument("--min_interior",  type=int,   default=10,
                         help="Minimum interior points to process a cluster "
-                             "(default 10)")
-    parser.add_argument("--interior_frac", type=float, default=0.30,
+                             "(default 5)")
+    parser.add_argument("--interior_frac", type=float, default=0.10,
                         help="Minimum fraction of cluster points that must "
-                             "lie inside the building footprint (default 0.30)")
+                             "lie inside the building footprint (default 0.10)")
+    parser.add_argument("--fp_buffer",     type=float, default=0.1,
+                        help="XY buffer added to footprint before interior-point "
+                             "test (default 0.5 m).  Catches wall-mounted clusters "
+                             "whose points sit on the exterior face of the wall.")
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output filename (in outputs/13_openings_json/).")
     args = parser.parse_args()
@@ -646,8 +730,15 @@ def main():
     # ── 2. Building footprint ─────────────────────────────────────────
     print("\n  Extracting building footprint ...")
     footprint    = extract_building_footprint(cm, world_verts)
-    prepared_fp  = prep(make_valid(footprint)) if (HAS_SHAPELY and footprint
-                                                   is not None) else None
+    if HAS_SHAPELY and footprint is not None:
+        # Buffer the footprint outward so wall-mounted clusters whose points
+        # sit on the exterior face of the wall still pass the containment test.
+        fp_buffered = make_valid(footprint.buffer(args.fp_buffer))
+        prepared_fp = prep(fp_buffered)
+        print(f"  Footprint buffered by {args.fp_buffer} m → "
+              f"test area: {fp_buffered.area:.1f} m²")
+    else:
+        prepared_fp = None
     if prepared_fp is None:
         print("  WARNING: no footprint — all cluster points treated as interior.")
 
@@ -710,6 +801,24 @@ def main():
         interior_mask = filter_interior_points(cluster_pts, prepared_fp)
         n_int  = int(interior_mask.sum())
         f_int  = n_int / len(cluster_pts) if len(cluster_pts) > 0 else 0.0
+
+        # Wall-proximity fallback: if the footprint test returns 0 interior
+        # points, attempt a quick wall-match and re-filter by depth.  This
+        # handles clusters on facades whose exterior face lies outside the
+        # (possibly too-tight) buffered footprint polygon.
+        if n_int < args.min_interior:
+            pre_match = find_nearest_surface(cluster_pts, vert_surfaces)
+            if pre_match is not None:
+                wall_mask = filter_by_wall_proximity(
+                    cluster_pts, pre_match,
+                    outward_tol=0.1,
+                    inward_tol=args.fp_buffer + 2.0)
+                if int(wall_mask.sum()) > n_int:
+                    interior_mask = wall_mask
+                    n_int  = int(interior_mask.sum())
+                    f_int  = n_int / len(cluster_pts) if len(cluster_pts) > 0 else 0.0
+                    print(f"  Interior (wall-proximity fallback): "
+                          f"{n_int}/{len(cluster_pts)} pts ({f_int*100:.0f}%)")
 
         print(f"  Interior: {n_int}/{len(cluster_pts)} pts "
               f"({f_int*100:.0f}%)")
@@ -777,12 +886,23 @@ def main():
         print(f"  Recess bbox: depth={depth_m:.3f}m  "
               f"width={width_m:.3f}m  height={height_m:.3f}m")
 
-        # ── d. Punch hole in wall ──────────────────────────────────────
+        # ── d. Punch holes in all overlapping wall panels ──────────────
+        n_holes = 0
         if matched.get("obj_id") and matched.get("idx", -1) >= 0:
-            punch_wall_hole(cm, int_verts, scale, translate, matched, bbox)
-            print("  → Hole punched in wall polygon.")
+            overlapping = find_all_overlapping_surfaces(
+                vert_surfaces, bbox, matched)
+            for vs in overlapping:
+                result = punch_wall_hole(
+                    cm, int_verts, scale, translate, vs, bbox)
+                if result is not None:
+                    n_holes += 1
+            if n_holes:
+                print(f"  → Holes punched in {n_holes} wall panel(s).")
+            else:
+                print("  → No valid wall panels to punch (hole outside all panel bounds).")
         else:
             print("  → No valid wall surface to punch (fake surface).")
+
 
         # ── e. Create BuildingInstallation with 5 cavity faces ─────────
         feat_id = f"recess_{cluster_idx}_{uuid.uuid4().hex[:8]}"

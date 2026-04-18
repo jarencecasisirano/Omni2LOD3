@@ -34,7 +34,7 @@ import numpy as np
 
 
 # ─── Directories ──────────────────────────────────────────────────────────────
-JSON_DIR   = "outputs/14_extrusions_json"
+JSON_DIR   = "outputs/12_curve_json"
 OUTPUT_DIR = "outputs/15_flat_gml"
 
 # ─── CityGML namespace / header constants ─────────────────────────────────────

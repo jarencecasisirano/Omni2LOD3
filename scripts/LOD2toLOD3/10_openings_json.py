@@ -49,7 +49,7 @@ from sklearn.cluster import DBSCAN
 # Directories
 # =====================================================================
 LAS_DIR    = "outputs/11B_flat"
-JSON_DIR   = "data/lod_2"
+JSON_DIR   = "outputs/00_json_wall_merged"
 OUTPUT_DIR = "outputs/13_openings_json"
 
 # Vertical-surface detection tolerance:

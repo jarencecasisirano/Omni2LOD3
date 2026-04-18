@@ -39,7 +39,7 @@ import laspy
 # Constants
 # =====================================================================
 INPUT_DIR  = "outputs/11A_facade_curve"
-JSON_DIR   = "data/lod_2"
+JSON_DIR   = "outputs/14_extrusions_json"
 OUTPUT_DIR = "outputs/12_curve_json"
 
 # Small inset applied to hole rings so they are strictly inside the polygon.

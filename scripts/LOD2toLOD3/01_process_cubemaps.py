@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 from rectify import render_face
 
-def process_images(input_dir, output_dir, pitch=0.0):
+def process_images(input_dir, output_dir, yaw=0.0, pitch=0.0, roll=0.0):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -38,7 +38,9 @@ def process_images(input_dir, output_dir, pitch=0.0):
                 'rotation': 0,
                 'interpolation': 'lanczos',
                 'maxWidth': 2048, # Adjust as needed
-                'pitch': pitch
+                'yaw': yaw,
+                'pitch': pitch,
+                'roll': roll
             }
             
             result = render_face(params)
@@ -58,7 +60,7 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, "../../"))
     
-    base_input_dir = os.path.join(project_root, "data", "raw_images", "google-street-view3")
+    base_input_dir = os.path.join(project_root, "data", "raw_images")
     base_output_dir = os.path.join(project_root, "outputs", "01_cubemaps")
     
     if not os.path.exists(base_input_dir):
@@ -92,6 +94,18 @@ if __name__ == "__main__":
     INPUT_DIR = os.path.join(base_input_dir, selected_subdir)
     OUTPUT_DIR = os.path.join(base_output_dir, selected_subdir)
     
+    # Prompt for Z-axis (yaw) rotation
+    while True:
+        try:
+            yaw_input = input("\nEnter the Z-axis camera yaw angle in degrees (positive = right, negative = left) [default 0]: ").strip()
+            if yaw_input == '':
+                yaw_angle = 0.0
+            else:
+                yaw_angle = float(yaw_input)
+            break
+        except ValueError:
+            print("Invalid input. Please enter a numeric value (e.g. 15, -10, 0).")
+
     # Prompt for X-axis (pitch) rotation
     while True:
         try:
@@ -103,10 +117,24 @@ if __name__ == "__main__":
             break
         except ValueError:
             print("Invalid input. Please enter a numeric value (e.g. 15, -10, 0).")
+
+    # Prompt for Y-axis (roll) rotation
+    while True:
+        try:
+            roll_input = input("\nEnter the Y-axis camera roll angle in degrees (positive = tilt right, negative = tilt left) [default 0]: ").strip()
+            if roll_input == '':
+                roll_angle = 0.0
+            else:
+                roll_angle = float(roll_input)
+            break
+        except ValueError:
+            print("Invalid input. Please enter a numeric value (e.g. 15, -10, 0).")
     
     print(f"\nProcessing folder: {selected_subdir}")
     print(f"Input:  {INPUT_DIR}")
     print(f"Output: {OUTPUT_DIR}")
+    print(f"Yaw:    {yaw_angle} degrees")
     print(f"Pitch:  {pitch_angle} degrees")
+    print(f"Roll:   {roll_angle} degrees")
     
-    process_images(INPUT_DIR, OUTPUT_DIR, pitch=pitch_angle)
+    process_images(INPUT_DIR, OUTPUT_DIR, yaw=yaw_angle, pitch=pitch_angle, roll=roll_angle)

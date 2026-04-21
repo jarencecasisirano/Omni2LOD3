@@ -11,9 +11,13 @@ def render_face(params):
     rotation     = params['rotation']
     interpolation= params['interpolation']
     max_width    = params.get('maxWidth', float('inf'))
+    yaw_deg      = params.get('yaw', 0.0)
+    yaw_rad      = math.radians(yaw_deg)
     # pitch: Y-axis rotation in degrees (positive = tilt up, negative = tilt down)
     pitch_deg    = params.get('pitch', 0.0)
     pitch_rad    = math.radians(pitch_deg)
+    roll_deg     = params.get('roll', 0.0)
+    roll_rad     = math.radians(roll_deg)
 
     read_width  = read_data['width']
     read_height = read_data['height']
@@ -47,6 +51,14 @@ def render_face(params):
     else:
         raise ValueError(f"Unknown face: {face}")
 
+    # X-axis (roll) rotation
+    if roll_rad != 0.0:
+        cos_r = math.cos(roll_rad)
+        sin_r = math.sin(roll_rad)
+        cx, cy, cz = (cx,
+                      cy * cos_r - cz * sin_r,
+                      cy * sin_r + cz * cos_r)
+
     # Y-axis (pitch) rotation – rotates the camera up/down
     # cx' =  cx*cos - cz*sin  (wait, standard Ry: cx'=cx*cos+cz*sin, cz'=-cx*sin+cz*cos)
     # Rotation matrix around Y-axis:
@@ -59,6 +71,14 @@ def render_face(params):
         cx, cy, cz = (cx * cos_p + cz * sin_p,
                       cy,
                      -cx * sin_p + cz * cos_p)
+
+    # Z-axis (yaw) rotation
+    if yaw_rad != 0.0:
+        cos_y = math.cos(yaw_rad)
+        sin_y = math.sin(yaw_rad)
+        cx, cy, cz = (cx * cos_y - cy * sin_y,
+                      cx * sin_y + cy * cos_y,
+                      cz)
 
     # Project to spherical coordinates
     r   = np.sqrt(cx*cx + cy*cy + cz*cz)

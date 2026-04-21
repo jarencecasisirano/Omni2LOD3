@@ -54,7 +54,7 @@ GML_FOOTER = "</CityModel>"
 
 # Opening hole classification: holes whose lower z is within this distance
 # above the building ground are treated as Doors; higher ones are Windows.
-DOOR_HEIGHT_THRESHOLD_DEFAULT = 0.4   # metres
+DOOR_HEIGHT_THRESHOLD_DEFAULT = 0.3   # metres
 
 
 # =====================================================================
@@ -200,13 +200,16 @@ def classify_hole(hole_pts, ground_z, door_threshold):
     """
     Return 'window' or 'door' based on the vertical position of the hole.
 
-    door_threshold: if the hole's bottom z is less than
-                    ground_z + door_threshold, it is a Door (opening
-                    starts near the ground); otherwise a Window.
+    door_threshold: if the hole's bottom z is at most
+                    ground_z + door_threshold, and its height is less than 4m,
+                    it is a Door; otherwise a Window.
     """
     z_vals  = [p[2] for p in hole_pts]
     hole_z0 = min(z_vals)   # bottom of the hole
-    if hole_z0 < ground_z + door_threshold:
+    hole_z1 = max(z_vals)   # top of the hole
+    hole_height = hole_z1 - hole_z0
+
+    if hole_z0 <= ground_z + door_threshold and hole_height < 4.0:
         return "door"
     return "window"
 
@@ -517,7 +520,7 @@ def main():
     parser.add_argument("--door_threshold", type=float,
                         default=DOOR_HEIGHT_THRESHOLD_DEFAULT,
                         help="Height above ground below which a wall hole is "
-                             "classified as a Door (default: 0.4 m)")
+                             "classified as a Door (default: 0.3 m)")
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output GML filename (in outputs/15_flat_gml/)")
     args = parser.parse_args()

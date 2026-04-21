@@ -7,7 +7,7 @@ from io import BytesIO
 
 # --- CONFIGURATION ---
 API_KEY = "AIzaSyBQNmEhhsUlTaveWeICQQ0XWb038AisdQQ"
-SAVE_DIR = "data/google-street-view2/"
+SAVE_DIR = "data/google-street-view4/"
 
 # Ensure the save directory exists
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -95,7 +95,7 @@ def main():
     # Require 4 coordinate pairs to form a bounding box/polygon
     parser.add_argument('--bbox', type=parse_coordinate, nargs=4, required=True,
                         help="Four coordinate pairs (lat,lng) defining the bounding box, separated by spaces. Example: --bbox 14.65,121.07 14.66,121.07 14.66,121.08 14.65,121.08")
-    parser.add_argument('--spacing', type=float, default=5.0,
+    parser.add_argument('--spacing', type=float, default=20.0,
                         help="Distance in meters between sampled points inside the bounding box. Default is 20m.")
     
     args = parser.parse_args()

@@ -58,7 +58,7 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, "../../"))
     
-    base_input_dir = os.path.join(project_root, "data", "raw_images")
+    base_input_dir = os.path.join(project_root, "data", "raw_images", "google-street-view3")
     base_output_dir = os.path.join(project_root, "outputs", "01_cubemaps")
     
     if not os.path.exists(base_input_dir):

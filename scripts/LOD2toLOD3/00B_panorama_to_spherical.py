@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 from PIL import Image
 
@@ -11,94 +12,107 @@ except ImportError:
 
 def convert_to_spherical(input_dir, output_dir, out_w=2560, out_h=1280):
     """
-    Converts 4 concatenated rectilinear images (from Google Street View API) 
+    Converts 6 separate tiles (N, E, S, W, Zenith, Nadir) from Google Street View
     into a mathematically correct equirectangular (spherical) panorama.
-    Similar to how PTGui stitches perspective images onto a sphere.
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    valid_extensions = ('.jpg', '.jpeg', '.png')
-    images = [f for f in os.listdir(input_dir) if f.casefold().endswith(valid_extensions)]
-    
-    if not images:
-        print(f"No images found in {input_dir}.")
+    locations = set()
+    for f in os.listdir(input_dir):
+        match = re.match(r"(tile_loc_\d+_[0-9\.\-]+_[0-9\.\-]+)_[a-z]+\.jpg", f, re.IGNORECASE)
+        if match:
+            locations.add(match.group(1))
+            
+    if not locations:
+        print(f"No valid tile sets found in {input_dir}.")
         return
 
-    print(f"Found {len(images)} images to process. Using OpenCV: {HAS_CV2}")
+    print(f"Found {len(locations)} locations to process. Using OpenCV: {HAS_CV2}")
     
     # Pre-calculate spherical coordinate maps for re-projection
     print("Pre-calculating rectilinear-to-equirectangular projection maps...")
     
-    # Create the coordinate grid for the output equirectangular image
-    x, y = np.meshgrid(np.arange(out_w), np.arange(out_h))
+    x_px, y_px = np.meshgrid(np.arange(out_w), np.arange(out_h))
+    yaw = (x_px / out_w) * 2 * np.pi - np.pi
+    pitch = np.pi/2 - (y_px / (out_h - 1)) * np.pi
     
-    # Map X to longitude (yaw). Center of the image (x=out_w/2) will be North (yaw=0).
-    yaw = (x / out_w) * 2 * np.pi - np.pi
+    x = np.cos(pitch) * np.cos(yaw)
+    y = np.cos(pitch) * np.sin(yaw)
+    z = np.sin(pitch)
     
-    # Map Y to latitude (pitch). Center of image is horizon (pitch=0).
-    pitch = np.pi/2 - (y / (out_h - 1)) * np.pi
+    max_abs = np.maximum(np.abs(x), np.maximum(np.abs(y), np.abs(z)))
     
-    # Determine the corresponding rectilinear camera face (0, 1, 2, 3) 
-    # based on the yaw angle. Each camera covers 90 degrees (pi/2).
-    c = np.floor((yaw + np.pi/4) / (np.pi/2)).astype(int) % 4
-    cam_angles = c * (np.pi / 2)
+    is_front = (x == max_abs)
+    is_back  = (x == -max_abs) & ~is_front
+    is_right = (y == max_abs) & ~(is_front | is_back)
+    is_left  = (y == -max_abs) & ~(is_front | is_back | is_right)
+    is_zenith= (z == max_abs) & ~(is_front | is_back | is_right | is_left)
+    is_nadir = (z == -max_abs) & ~(is_front | is_back | is_right | is_left | is_zenith)
     
-    # Relative yaw angle from the center of the selected camera
-    delta_yaw = yaw - cam_angles
-    # Wrap to [-pi, pi] to handle angles correctly
-    delta_yaw = (delta_yaw + np.pi) % (2 * np.pi) - np.pi
+    u = np.zeros_like(x)
+    v = np.zeros_like(x)
+    face_idx = np.zeros(x.shape, dtype=int)
     
-    # Project spherical coordinates onto the rectilinear projection plane (Z=1)
-    u = np.tan(delta_yaw)
-    cos_dy = np.cos(delta_yaw)
-    cos_dy[cos_dy == 0] = 1e-5 # Avoid division by zero
-    v = np.tan(pitch) / cos_dy
+    u[is_front]  = y[is_front] / x[is_front]
+    v[is_front]  = -z[is_front] / x[is_front]
+    face_idx[is_front] = 0
     
-    # Valid pixels mask (where vertical FOV is within the perspective camera bounds)
-    mask = np.abs(v) <= 1.0
+    u[is_right]  = -x[is_right] / y[is_right]
+    v[is_right]  = -z[is_right] / y[is_right]
+    face_idx[is_right] = 1
     
-    H_face = 640 # Assuming height of typical GSV query is 640
-    W_face = 640 # Assuming width per face is 640
+    u[is_back]   = y[is_back] / x[is_back]
+    v[is_back]   = z[is_back] / x[is_back]
+    face_idx[is_back] = 2
     
-    # Pixel coordinates on the face
-    px_u = (u + 1) * 0.5 * W_face
-    px_v = (1 - v) * 0.5 * H_face
+    u[is_left]   = -x[is_left] / y[is_left]
+    v[is_left]   = z[is_left] / y[is_left]
+    face_idx[is_left] = 3
     
-    # Map to the corresponding face segment in the concatenated image strip
-    map_x = px_u + c * W_face
-    map_y = px_v
+    u[is_zenith] = y[is_zenith] / z[is_zenith]
+    v[is_zenith] = x[is_zenith] / z[is_zenith]
+    face_idx[is_zenith] = 4
     
-    # Clip bounds to prevent out-of-index errors
-    map_x = np.clip(map_x, 0, (4 * W_face) - 1).astype(np.float32)
-    map_y = np.clip(map_y, 0, H_face - 1).astype(np.float32)
+    u[is_nadir]  = -y[is_nadir] / z[is_nadir]
+    v[is_nadir]  = x[is_nadir] / z[is_nadir]
+    face_idx[is_nadir] = 5
 
-    for filename in images:
-        input_path = os.path.join(input_dir, filename)
-        output_path = os.path.join(output_dir, filename)
-        
-        try:
-            with Image.open(input_path) as img:
-                img_pano = np.array(img.convert('RGB'))
+    face_names = ['front', 'right', 'back', 'left', 'zenith', 'nadir']
+
+    for loc_prefix in sorted(locations):
+        faces = []
+        skip = False
+        for name in face_names:
+            input_path = os.path.join(input_dir, f"{loc_prefix}_{name}.jpg")
+            try:
+                with Image.open(input_path) as img:
+                    faces.append(np.array(img.convert('RGB')))
+            except Exception as e:
+                print(f"Skipping {loc_prefix}, error loading {name}: {e}")
+                skip = True
+                break
                 
-            # Allow dynamic face sizes depending on the image downloaded
-            actual_H_face = img_pano.shape[0]
-            actual_W_face = img_pano.shape[1] // 4
+        if skip:
+            continue
             
-            # Recalculate mappings if the image dimensions differ from 640x640 default
-            if actual_H_face != H_face or actual_W_face != W_face:
-                cur_px_u = (u + 1) * 0.5 * actual_W_face
-                cur_px_v = (1 - v) * 0.5 * actual_H_face
-                cur_map_x = np.clip(cur_px_u + c * actual_W_face, 0, img_pano.shape[1] - 1).astype(np.float32)
-                cur_map_y = np.clip(cur_px_v, 0, img_pano.shape[0] - 1).astype(np.float32)
-            else:
-                cur_map_x, cur_map_y = map_x, map_y
+        try:
+            H_face, W_face = faces[0].shape[:2]
+            img_pano = np.vstack(faces) # shape (6*H_face, W_face, 3)
+            
+            px_u = (u + 1) * 0.5 * W_face
+            px_v = (v + 1) * 0.5 * H_face
+            
+            map_x = np.clip(px_u, 0, W_face - 1).astype(np.float32)
+            map_y = np.clip(px_v + face_idx * H_face, 0, 6 * H_face - 1).astype(np.float32)
+            
+            output_filename = f"{loc_prefix}_pano.jpg"
+            output_path = os.path.join(output_dir, output_filename)
             
             if HAS_CV2:
-                spherical = cv2.remap(img_pano, cur_map_x, cur_map_y, interpolation=cv2.INTER_CUBIC, 
+                spherical = cv2.remap(img_pano, map_x, map_y, interpolation=cv2.INTER_CUBIC, 
                                       borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
-                spherical[~mask] = 0
             else:
-                coords = np.array([cur_map_y.ravel(), cur_map_x.ravel()])
+                coords = np.array([map_y.ravel(), map_x.ravel()])
                 spherical = np.zeros((out_h, out_w, 3), dtype=np.uint8)
                 for ch in range(3):
                     sampled = map_coordinates(
@@ -109,14 +123,13 @@ def convert_to_spherical(input_dir, output_dir, out_w=2560, out_h=1280):
                         cval=0.0
                     )
                     spherical[..., ch] = sampled.reshape(out_h, out_w).astype(np.uint8)
-                spherical[~mask] = 0
             
             spherical_img = Image.fromarray(spherical, 'RGB')
             spherical_img.save(output_path, quality=95)
-            print(f"  -> Re-projected and saved: {filename}")
-                
+            print(f"  -> Re-projected and saved: {output_filename}")
+            
         except Exception as e:
-            print(f"Error processing {filename}: {e}")
+            print(f"Error processing {loc_prefix}: {e}")
             
     print(f"\nAll equirectangular spherical models saved successfully to: {output_dir}")
 
@@ -124,8 +137,8 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, "../../"))
     
-    input_dir = os.path.join(project_root, "data", "google-street-view")
-    output_dir = os.path.join(project_root, "data", "google-street-view-spherical")
+    input_dir = os.path.join(project_root, "data", "google-street-view4")
+    output_dir = os.path.join(project_root, "data", "google-street-view-spherical-4")
     
     print(f"Input Directory:  {input_dir}")
     print(f"Output Directory: {output_dir}")

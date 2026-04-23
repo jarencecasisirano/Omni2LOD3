@@ -13,7 +13,8 @@ import argparse
 import json
 import numpy as np
 from typing import List, Tuple, Optional
-from scipy.spatial import ConvexHull
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.ops import unary_union
 
 DEFAULT_INPUT_DIR = 'data/lod_2'
 DEFAULT_OUTPUT_DIR = 'outputs/00_json_wall_merged'
@@ -192,14 +193,11 @@ def merge_wall_surfaces(wall_surfaces: List[WallSurface],
                 if not normals_similar:
                     continue
                 
-                # Check if adjacent or coplanar to any surface in the group
+                # Check if adjacent (sharing vertices) to any surface in the group
                 is_adjacent_to_group = False
                 for group_idx in group:
                     group_surface = wall_surfaces[group_idx]
                     if group_surface.is_adjacent(other_wall, distance_threshold):
-                        is_adjacent_to_group = True
-                        break
-                    if group_surface.is_coplanar(other_wall, plane_distance_threshold=0.5):
                         is_adjacent_to_group = True
                         break
                 
@@ -219,35 +217,71 @@ def merge_wall_surfaces(wall_surfaces: List[WallSurface],
             combined_vertices = np.vstack(all_vertices)
             
             try:
-                # Project to 2D for convex hull
+                # PCA to find the best 2D projection plane for the wall
                 centroid = np.mean(combined_vertices, axis=0)
                 centered = combined_vertices - centroid
                 
-                # Use PCA to find best 2D projection plane
                 cov = np.cov(centered.T)
                 eigenvalues, eigenvectors = np.linalg.eig(cov)
                 idx_sort = eigenvalues.argsort()[::-1]
-                eigenvectors = eigenvectors[:, idx_sort]
+                eigenvectors = eigenvectors[:, idx_sort].real
                 
-                projected_2d = centered @ eigenvectors[:, :2]
+                # Build a Shapely polygon for each wall surface in 2D
+                shapely_polys = []
+                for idx in group:
+                    coords_3d = wall_surfaces[idx].coordinates
+                    coords_2d = (coords_3d - centroid) @ eigenvectors[:, :2]
+                    poly = ShapelyPolygon(coords_2d)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                    if not poly.is_empty:
+                        shapely_polys.append(poly)
                 
-                # Compute 2D convex hull
-                hull_2d = ConvexHull(projected_2d)
-                hull_indices = hull_2d.vertices
+                if not shapely_polys:
+                    raise ValueError("All projected polygons are empty")
                 
-                # Get 3D coordinates of hull vertices
-                hull_vertices_3d = combined_vertices[hull_indices]
+                # Buffer slightly to close micro-gaps between adjacent polygons
+                eps = 1e-3
+                buffered_polys = [p.buffer(eps) for p in shapely_polys]
+                
+                # Spatial union – preserves true outline (no diagonals)
+                union_poly = unary_union(buffered_polys).buffer(-eps)
+                
+                # If the union is a MultiPolygon, take the largest piece
+                if union_poly.geom_type == 'MultiPolygon':
+                    union_poly = max(union_poly.geoms, key=lambda p: p.area)
+                
+                # Strip any interior holes (artifacts from imprecise overlaps)
+                if union_poly.geom_type == 'Polygon' and list(union_poly.interiors):
+                    union_poly = ShapelyPolygon(union_poly.exterior)
+                
+                # Extract exterior ring (drop the duplicate closing vertex)
+                exterior_2d = np.array(union_poly.exterior.coords[:-1])
+                
+                # Reconstruct 3D coordinates from the 2D projection
+                exterior_3d = exterior_2d @ eigenvectors[:, :2].T + centroid
+                
+                # Snap each vertex to nearest original vertex to prevent gaps
+                # with neighboring non-merged surfaces
+                snapped = []
+                for pt in exterior_3d:
+                    dists = np.linalg.norm(combined_vertices - pt, axis=1)
+                    min_idx = np.argmin(dists)
+                    if dists[min_idx] < 0.05:
+                        snapped.append(combined_vertices[min_idx])
+                    else:
+                        snapped.append(pt)
+                exterior_3d = np.array(snapped)
                 
                 # Check winding order w.r.t the original outward normal
-                # Convex hulls guarantees no collinear consecutive triplets
-                v1 = hull_vertices_3d[1] - hull_vertices_3d[0]
-                v2 = hull_vertices_3d[2] - hull_vertices_3d[0]
+                v1 = exterior_3d[1] - exterior_3d[0]
+                v2 = exterior_3d[2] - exterior_3d[0]
                 new_normal = np.cross(v1, v2)
                 
                 if np.dot(new_normal, group_normal) < 0:
-                    hull_vertices_3d = hull_vertices_3d[::-1]
+                    exterior_3d = exterior_3d[::-1]
                 
-                merged_surface = WallSurface(hull_vertices_3d, semantic_val=wall_surfaces[group[0]].semantic_val)
+                merged_surface = WallSurface(exterior_3d, semantic_val=wall_surfaces[group[0]].semantic_val)
                 merged_surfaces.append(merged_surface)
                 
                 merge_count += len(group) - 1

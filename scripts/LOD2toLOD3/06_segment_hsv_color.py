@@ -128,16 +128,16 @@ def segment_by_hsv(file_path, output_dir, n_clusters=5, hsv_weights=(2.0, 2.0, 0
     hsv_norm = hsv.copy()
     hsv_norm[:, 0] /= 360.0
 
-    # Apply channel weights
-    w_h, w_s, w_v = hsv_weights
-    hsv_weighted = hsv_norm.copy()
-    hsv_weighted[:, 0] *= w_h
-    hsv_weighted[:, 1] *= w_s
-    hsv_weighted[:, 2] *= w_v
-
-    # Standardize features
+    # Standardize features FIRST
     scaler = StandardScaler()
-    features = scaler.fit_transform(hsv_weighted)
+    features_scaled = scaler.fit_transform(hsv_norm)
+
+    # THEN apply channel weights
+    w_h, w_s, w_v = hsv_weights
+    features = features_scaled.copy()
+    features[:, 0] *= w_h
+    features[:, 1] *= w_s
+    features[:, 2] *= w_v
 
     # KMeans clustering
     print(f"  Clustering into {n_clusters} segments (HSV weights: H={w_h}, S={w_s}, V={w_v})...")
@@ -217,7 +217,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Unsupervised point cloud segmentation using HSV color clustering")
     parser.add_argument("--input", type=str,
-                        default="outputs/07_merged_las/NEC-3.las",
+                        default="outputs/07_merged_las/ICHEM-2-GOOD.las",
                         help="Input LAS file path")
     parser.add_argument("--input_dir", type=str, default=None,
                         help="Input directory of LAS files (overrides --input)")

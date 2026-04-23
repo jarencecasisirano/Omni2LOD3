@@ -608,7 +608,7 @@ def punch_hole_and_create_opening(cm, int_verts, scale, translate,
 def main():
     parser = argparse.ArgumentParser(
         description="Facade Features → CityJSON LOD3")
-    parser.add_argument("--eps",        type=float, default=0.3,
+    parser.add_argument("--eps",        type=float, default=3.0,
                         help="DBSCAN eps (neighbourhood radius, default 0.3)")
     parser.add_argument("--min_samples", type=int,  default=30,
                         help="DBSCAN min_samples (default 30)")

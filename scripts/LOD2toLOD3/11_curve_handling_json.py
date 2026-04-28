@@ -341,24 +341,51 @@ def find_matched_surface(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
 # =====================================================================
 # Split points by closest vertical surface (pure geometry)
 # =====================================================================
-def split_by_surface(points, vert_surfaces):
-    """Assign every point to the closest vertical surface by signed distance."""
+def split_by_surface(points, vert_surfaces, dist_tol=2.0, min_pts=5):
+    """
+    Assign every point to the closest vertical surface by signed distance,
+    then discard any point whose absolute distance to its assigned surface
+    exceeds *dist_tol* metres.  Sub-clusters with fewer than *min_pts*
+    surviving points are also dropped.
+
+    This prevents features from being created on surfaces that have no
+    actual points nearby (i.e. the point cloud has no data in that area).
+    """
     if not vert_surfaces:
         return []
 
-    pts_xy   = points[:, :2]
-    n_surfs  = len(vert_surfaces)
+    pts_xy  = points[:, :2]
+    n_surfs = len(vert_surfaces)
 
-    dist_matrix = np.empty((len(points), n_surfs), dtype=np.float64)
+    dist_matrix = np.full((len(points), n_surfs), np.inf, dtype=np.float64)
+    pad = dist_tol
+
     for j, vs in enumerate(vert_surfaces):
-        dist_matrix[:, j] = (pts_xy - vs["origin_2d"]) @ vs["normal_2d"]
+        # Only consider points within the padded bounding box of the surface
+        in_bounds = (
+            (points[:, 0] >= vs["xy_min"][0] - pad) &
+            (points[:, 0] <= vs["xy_max"][0] + pad) &
+            (points[:, 1] >= vs["xy_min"][1] - pad) &
+            (points[:, 1] <= vs["xy_max"][1] + pad) &
+            (points[:, 2] >= vs["z_min"] - pad) &
+            (points[:, 2] <= vs["z_max"] + pad)
+        )
+        if not in_bounds.any():
+            continue
+        
+        pts_in_bounds = pts_xy[in_bounds]
+        dist_matrix[in_bounds, j] = (pts_in_bounds - vs["origin_2d"]) @ vs["normal_2d"]
 
-    assignments = np.argmin(np.abs(dist_matrix), axis=1)
+    assignments  = np.argmin(np.abs(dist_matrix), axis=1)
+    min_abs_dist = np.abs(dist_matrix)[np.arange(len(points)), assignments]
+
+    # Only keep points that are actually close to their assigned surface
+    close_mask = min_abs_dist <= dist_tol
 
     sub_clusters = []
     for j, vs in enumerate(vert_surfaces):
-        mask = assignments == j
-        if not mask.any():
+        mask = (assignments == j) & close_mask
+        if mask.sum() < min_pts:
             continue
         sub_pts = points[mask]
         wall_origin_depth = float(np.dot(vs["origin_2d"], vs["normal_2d"]))
@@ -406,11 +433,36 @@ def compute_wall_projection(points, surface):
     t_min_cl, t_max_cl = float(t_pts.min()), float(t_pts.max())
     z_min_cl, z_max_cl = float(z_pts.min()), float(z_pts.max())
 
+    # wall_t = surface["coords"][:, :2] @ txy
+    # t_min  = max(t_min_cl, float(wall_t.min()))
+    # t_max  = min(t_max_cl, float(wall_t.max()))
+    # z_min  = max(z_min_cl, surface["z_min"])
+    # z_max  = min(z_max_cl, surface["z_max"])
+    
+    # if t_max <= t_min or z_max <= z_min:
+    #     return {}
+
+    #BINAGO
     wall_t = surface["coords"][:, :2] @ txy
-    t_min  = max(t_min_cl, float(wall_t.min()))
-    t_max  = min(t_max_cl, float(wall_t.max()))
-    z_min  = max(z_min_cl, surface["z_min"])
-    z_max  = min(z_max_cl, surface["z_max"])
+    wall_t_min = float(wall_t.min())
+    wall_t_max = float(wall_t.max())
+
+    # Clamp the window to the wall's tangential extent.
+    # If the point cloud overlaps the wall at all, clip to overlap.
+    # If it doesn't overlap (points entirely outside), center it within the wall.
+    t_min = max(t_min_cl, wall_t_min)
+    t_max = min(t_max_cl, wall_t_max)
+    if t_max <= t_min:
+        # No overlap — place window at the point cloud center, clipped to wall width
+        cl_center = (t_min_cl + t_max_cl) / 2.0
+        cl_half   = (t_max_cl - t_min_cl) / 2.0
+        t_min = max(cl_center - cl_half, wall_t_min)
+        t_max = min(cl_center + cl_half, wall_t_max)
+
+    z_min = max(z_min_cl, surface["z_min"])
+    z_max = min(z_max_cl, surface["z_max"])
+    if z_max <= z_min:
+        z_min, z_max = z_min_cl, z_max_cl
 
     if t_max <= t_min or z_max <= z_min:
         return {}
@@ -787,8 +839,13 @@ def main():
         print(f"    Points loaded: {len(points):,}")
 
         if vert_surfaces:
-            sub_clusters = split_by_surface(points, vert_surfaces)
-            print(f"    → split into {len(sub_clusters)} wall sub-cluster(s)")
+            sub_clusters = split_by_surface(
+                points, vert_surfaces,
+                dist_tol=2.0,
+                min_pts=args.min_pts_slab,
+            )
+            print(f"    → split into {len(sub_clusters)} wall sub-cluster(s) "
+                  f"(within 2.0 m of surface, min {args.min_pts_slab} pts)")
         else:
             wall_n = _pca_wall_normal(points)
             if wall_n is None:
@@ -818,7 +875,7 @@ def main():
                 continue
 
             wall_n_unit = wall_n / np.linalg.norm(wall_n)
-
+            
             # Use 1 slab (whole cluster as one rectangular prism), matching
             # the original script's defaults for wall-splitting mode.
             prism_list = tessellate_curved_cluster(
@@ -853,7 +910,8 @@ def main():
                     summary[user_ftype] = summary.get(user_ftype, 0) + 1
                     continue
                 else:
-                    print("    → projection degenerate, fallback to BuildingInstallation")
+                    print("    → projection degenerate, skipping")
+                    continue
 
             # Fallback or BuildingInstallation
             fallback_feats.append((user_ftype, feat_id, all_faces, obj_id))

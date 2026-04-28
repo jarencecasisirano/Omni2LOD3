@@ -217,7 +217,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Unsupervised point cloud segmentation using HSV color clustering")
     parser.add_argument("--input", type=str,
-                        default="outputs/07_merged_las/ICHEM-2-GOOD.las",
+                        default="outputs/06_aligned_p2p/NIMBB-2/B-best.las",
                         help="Input LAS file path")
     parser.add_argument("--input_dir", type=str, default=None,
                         help="Input directory of LAS files (overrides --input)")

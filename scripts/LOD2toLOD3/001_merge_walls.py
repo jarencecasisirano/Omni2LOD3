@@ -16,45 +16,96 @@ from typing import List, Tuple, Optional
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
 
-DEFAULT_INPUT_DIR = 'data/lod_2'
-DEFAULT_OUTPUT_DIR = 'outputs/00_json_wall_merged'
-
-def newell_normal(coords: np.ndarray) -> np.ndarray:
-    """Compute polygon normal using Newell's method (robust for non-convex rings)."""
-    n = np.zeros(3)
-    num = len(coords)
-    for i in range(num):
-        c  = coords[i]
-        nx = coords[(i + 1) % num]
-        n[0] += (c[1] - nx[1]) * (c[2] + nx[2])
-        n[1] += (c[2] - nx[2]) * (c[0] + nx[0])
-        n[2] += (c[0] - nx[0]) * (c[1] + nx[1])
-    norm = np.linalg.norm(n)
-    if norm < 1e-9:
-        return np.array([0.0, 0.0, 1.0])
-    return n / norm
-
+DEFAULT_INPUT_DIR = r'C:\Projects\LOD3Test\Data\cityforge'
+DEFAULT_OUTPUT_DIR = r'C:\Projects\LOD3Test\Outputs\merged_copy'
 
 def get_poly_normal(coords: np.ndarray) -> np.ndarray:
-    """Alias kept for backward compatibility; delegates to newell_normal."""
-    return newell_normal(coords)
+    """Calculate polygon normal using Newell's method.
+
+    Newell's method accumulates cross-product contributions from every edge,
+    so it works correctly for all convex and concave polygons regardless of
+    vertex ordering.  Unlike the first-3-vertex approach it never degenerates
+    on near-collinear leading vertices (common in photogrammetry meshes).
+    """
+    n = np.zeros(3)
+    count = len(coords)
+    if count < 3:
+        return np.array([0.0, 0.0, 1.0])
+    for i in range(count):
+        j = (i + 1) % count
+        n[0] += (coords[i][1] - coords[j][1]) * (coords[i][2] + coords[j][2])
+        n[1] += (coords[i][2] - coords[j][2]) * (coords[i][0] + coords[j][0])
+        n[2] += (coords[i][0] - coords[j][0]) * (coords[i][1] + coords[j][1])
+    length = np.linalg.norm(n)
+    if length < 1e-6:
+        return np.array([0.0, 0.0, 1.0])
+    return n / length
 
 
-def ensure_outward_winding(coords: np.ndarray, building_centroid: np.ndarray) -> np.ndarray:
+def _ring_is_valid_for_export(ring: np.ndarray, normal_hint: Optional[np.ndarray] = None,
+                              max_planar_dev: float = 0.05) -> bool:
+    """Validate ring geometry to avoid holes from downstream polygon drops.
+
+    A ring is export-safe when it has:
+    - at least 3 unique vertices,
+    - non-zero area (Newell norm),
+    - near-planarity within max_planar_dev metres.
     """
-    Return *coords* (exterior ring vertices) with CCW winding so its Newell
-    normal points AWAY from *building_centroid* (outward for a closed shell).
-    If the normal already points outward the array is returned unchanged;
-    otherwise a reversed copy is returned.
-    """
-    normal = newell_normal(coords)
-    wall_centroid = coords.mean(axis=0)
-    # Vector from wall centroid toward building centroid is the inward direction.
-    # The outward normal should have dot < 0 with that inward vector.
-    to_bldg = building_centroid - wall_centroid
-    if np.dot(normal, to_bldg) > 0:
-        return coords[::-1]
-    return coords
+    if ring is None or len(ring) < 3:
+        return False
+
+    # Remove trailing closure if present.
+    pts = ring[:-1] if len(ring) > 1 and np.allclose(ring[0], ring[-1]) else ring
+    if len(pts) < 3:
+        return False
+
+    # Remove consecutive duplicates.
+    cleaned = [pts[0]]
+    for p in pts[1:]:
+        if np.linalg.norm(p - cleaned[-1]) > 1e-8:
+            cleaned.append(p)
+    if len(cleaned) < 3:
+        return False
+
+    # Require at least 3 unique coordinates.
+    uniq = {tuple(np.round(p, 8)) for p in cleaned}
+    if len(uniq) < 3:
+        return False
+
+    arr = np.array(cleaned, dtype=np.float64)
+    normal = get_poly_normal(arr)
+    if np.linalg.norm(normal) < 1e-6:
+        return False
+
+    # Planarity check against ring plane.
+    # We allow up to 0.5m deviation to preserve curved walls without flattening them.
+    ref_n = normal_hint if normal_hint is not None and np.linalg.norm(normal_hint) > 1e-6 else normal
+    ref_n = ref_n / np.linalg.norm(ref_n)
+    p0 = arr[0]
+    distances = [abs(float(np.dot(ref_n, p - p0))) for p in arr[1:]]
+    if distances and max(distances) > max_planar_dev:
+        return False
+
+    return True
+
+
+def _surface_is_valid_for_export(surface: 'WallSurface',
+                                 max_planar_dev: float = 0.5) -> bool:
+    """Validate all rings of a wall surface for robust CityGML conversion."""
+    if not surface.rings_coords:
+        return False
+
+    ext = surface.rings_coords[0]
+    ext_normal = get_poly_normal(ext)
+    if not _ring_is_valid_for_export(ext, max_planar_dev=max_planar_dev):
+        return False
+
+    for hole in surface.rings_coords[1:]:
+        # Hole rings should lie on the same wall plane.
+        if not _ring_is_valid_for_export(hole, normal_hint=ext_normal,
+                                         max_planar_dev=max_planar_dev):
+            return False
+    return True
 
 
 class WallSurface:
@@ -127,6 +178,28 @@ def encode_vertex(pt, scale, translate):
     return [int(round((pt[i] - translate[i]) / scale[i])) for i in range(3)]
 
 
+def _walls_coplanar(wall_a: 'WallSurface', wall_b: 'WallSurface',
+                    cos_threshold: float, plane_tol: float = 0.25) -> bool:
+    """Return True if wall_b lies on the same plane as wall_a.
+
+    Two wall fragments belong to the same facade plane when:
+      1. Their normals are parallel (within angle threshold).
+      2. Every vertex of wall_b is within plane_tol metres of wall_a's plane.
+    This is the criterion that lets the merger follow the roofline: once all
+    coplanar fragments are unioned the top boundary is the roofline itself.
+    """
+    na = wall_a.get_normal()
+    nb = wall_b.get_normal()
+    # Require normals to point in the SAME direction (positive dot product).
+    # Using abs() would incorrectly group inner-courtyard faces with outer
+    # facade faces — they're on the same plane but face opposite ways and
+    # must NOT be merged together.
+    if np.dot(na, nb) < cos_threshold:
+        return False
+    da = float(np.dot(na, wall_a.coordinates[0]))
+    return all(abs(float(np.dot(na, pt)) - da) < plane_tol for pt in wall_b.coordinates)
+
+
 def select_json_file(json_dir: str = DEFAULT_INPUT_DIR) -> Optional[str]:
     """Interactive selection of JSON file from directory."""
     if not os.path.exists(json_dir):
@@ -184,189 +257,319 @@ def get_vertex_id(enc, vertices, vertex_map):
 def merge_wall_surfaces(wall_surfaces: List[WallSurface],
                         normal_angle_threshold: float = 5.0,
                         distance_threshold: float = 2.0,
-                        obj_id: str = "",
-                        building_centroid: np.ndarray = None) -> Tuple[List[WallSurface], int]:
-    """Merge adjacent wall surfaces with similar normals while preserving interior holes."""
+                        obj_id: str = "") -> Tuple[List[WallSurface], int]:
+    """Merge coplanar WallSurfaces so the result follows the roofline.
+
+    Groups wall fragments by coplanarity (same normal direction + same plane
+    offset) rather than by shared vertices.  This means all fragments of a
+    single facade — even ones separated by small gaps from the tessellation —
+    are unioned into one polygon whose top boundary is the roofline.
+
+    MultiPolygon results (disconnected facade sections on the same plane) are
+    kept as separate WallSurface outputs so no geometry is ever discarded.
+
+    Args:
+        normal_angle_threshold: max angle (degrees) between normals to be
+            considered parallel — controls facade direction tolerance.
+        distance_threshold: max distance (metres) a vertex may be from the
+            seed wall's plane and still be considered coplanar.  Default 2.0 m
+            is intentionally generous to handle meshing noise; tighten to ~0.1
+            for clean CAD-derived files.
+    """
     if len(wall_surfaces) == 0:
         return [], 0
-    
-    angle_threshold_rad = np.radians(normal_angle_threshold)
-    cos_threshold = np.cos(angle_threshold_rad)
-    
+
+    cos_threshold = np.cos(np.radians(normal_angle_threshold))
+    # plane_tol: how far off-plane a vertex may be and still count as coplanar.
+    # We re-use distance_threshold so existing CLI calls keep working; cap at
+    # 0.5 m to avoid swallowing unrelated surfaces on nearly-parallel planes.
+    plane_tol = min(distance_threshold, 0.5)
+
     merged_flags = [False] * len(wall_surfaces)
     merged_surfaces = []
     merge_count = 0
-    
+
     for i, wall in enumerate(wall_surfaces):
         if merged_flags[i]:
             continue
-        
+
         group = [i]
-        group_normal = wall.get_normal()
         merged_flags[i] = True
-        
+
+        # Grow group: add every wall that lies on the same plane as the seed.
         changed = True
         while changed:
             changed = False
             for j in range(len(wall_surfaces)):
                 if merged_flags[j]:
                     continue
-                
-                other_wall = wall_surfaces[j]
-                other_normal = other_wall.get_normal()
-                
-                dot_product = np.dot(group_normal, other_normal)
-                normals_similar = abs(dot_product) >= cos_threshold
-                
-                if not normals_similar:
-                    continue
-                
-                is_adjacent_to_group = False
-                for group_idx in group:
-                    group_surface = wall_surfaces[group_idx]
-                    if group_surface.is_adjacent(other_wall, distance_threshold):
-                        is_adjacent_to_group = True
-                        break
-                
-                if is_adjacent_to_group:
-                    group.append(j)
-                    merged_flags[j] = True
-                    changed = True
-        
+                if _walls_coplanar(wall_surfaces[group[0]], wall_surfaces[j],
+                                   cos_threshold, plane_tol):
+                    is_adjacent_to_group = False
+                    for group_idx in group:
+                        if wall_surfaces[group_idx].is_adjacent(wall_surfaces[j], distance_threshold):
+                            is_adjacent_to_group = True
+                            break
+                    
+                    if is_adjacent_to_group:
+                        group.append(j)
+                        merged_flags[j] = True
+                        changed = True
+
         if len(group) == 1:
             merged_surfaces.append(wall_surfaces[group[0]])
-        else:
-            all_vertices = []
+            continue
+
+        all_vertices = []
+        for idx in group:
+            for r in wall_surfaces[idx].rings_coords:
+                all_vertices.append(r)
+        combined_vertices = np.vstack(all_vertices)
+
+        try:
+            # ── Step 1: compute a robust reference normal from ALL group members.
+            # Sign-align each member normal to the first before averaging so that
+            # anti-parallel normals (flipped input faces) don't cancel out.
+            raw_normals = np.array([wall_surfaces[idx].get_normal() for idx in group])
+            ref_n = raw_normals[0]
+            for k in range(1, len(raw_normals)):
+                if np.dot(raw_normals[k], ref_n) < 0:
+                    raw_normals[k] = -raw_normals[k]
+            group_normal = raw_normals.mean(axis=0)
+            gn_len = np.linalg.norm(group_normal)
+            group_normal = group_normal / gn_len if gn_len > 1e-6 else ref_n
+
+            centroid = np.mean(combined_vertices, axis=0)
+            centered = combined_vertices - centroid
+
+            cov = np.cov(centered.T)
+            eigenvalues, eigenvectors = np.linalg.eig(cov)
+            idx_sort = eigenvalues.argsort()[::-1]
+            eigenvectors = eigenvectors[:, idx_sort].real
+
+            # ── Step 2: anchor eigenvector handedness.
+            # Shapely always produces CCW exterior rings in 2D.  For that CCW
+            # winding to produce an outward-facing normal in 3D the cross product
+            # (e0 × e1) must point in the SAME direction as group_normal.
+            # If it doesn't, flip e1 to correct the handedness before projecting.
+            e0 = eigenvectors[:, 0]
+            e1 = eigenvectors[:, 1]
+            if np.dot(np.cross(e0, e1), group_normal) < 0:
+                eigenvectors[:, 1] = -e1
+
+            shapely_polys = []
             for idx in group:
+                rings_2d = []
                 for r in wall_surfaces[idx].rings_coords:
-                    all_vertices.append(r)
-            combined_vertices = np.vstack(all_vertices)
-            
-            try:
-                centroid = np.mean(combined_vertices, axis=0)
-                centered = combined_vertices - centroid
-                
-                cov = np.cov(centered.T)
-                eigenvalues, eigenvectors = np.linalg.eig(cov)
-                idx_sort = eigenvalues.argsort()[::-1]
-                eigenvectors = eigenvectors[:, idx_sort].real
-                
-                shapely_polys = []
-                for idx in group:
-                    rings_2d = []
-                    for r in wall_surfaces[idx].rings_coords:
-                        coords_2d = (r - centroid) @ eigenvectors[:, :2]
-                        rings_2d.append(coords_2d)
-                    
-                    if not rings_2d:
-                        continue
-                    
-                    poly = ShapelyPolygon(shell=rings_2d[0], holes=rings_2d[1:])
-                    if not poly.is_valid:
-                        poly = poly.buffer(0)
-                    if not poly.is_empty:
-                        shapely_polys.append(poly)
-                
-                if not shapely_polys:
-                    raise ValueError("All projected polygons are empty")
-                
-                eps = 1e-3
-                buffered_polys = [p.buffer(eps) for p in shapely_polys]
-                union_result = unary_union(buffered_polys).buffer(-eps)
-                
-                if union_result.geom_type == 'MultiPolygon':
-                    union_polys_list = list(union_result.geoms)
-                else:
-                    union_polys_list = [union_result]
-                
-                def proj_to_3d(coords_2d_arr):
-                    pts_3d = coords_2d_arr @ eigenvectors[:, :2].T + centroid
-                    snapped = []
-                    for pt in pts_3d:
-                        dists = np.linalg.norm(combined_vertices - pt, axis=1)
-                        if len(dists) > 0:
-                            min_idx = np.argmin(dists)
-                            if dists[min_idx] < 0.05:
-                                snapped.append(combined_vertices[min_idx])
-                                continue
-                        snapped.append(pt)
-                    return np.array(snapped)
+                    coords_2d = (r - centroid) @ eigenvectors[:, :2]
+                    rings_2d.append(coords_2d)
+                if not rings_2d:
+                    continue
+                poly = ShapelyPolygon(shell=rings_2d[0], holes=rings_2d[1:])
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if not poly.is_empty:
+                    shapely_polys.append(poly)
 
-                def restore_collinear_vertices(simplified_ring_3d, original_vertices_3d, tol=1e-3):
-                    new_ring = []
-                    num_pts = len(simplified_ring_3d)
-                    unique_orig = np.unique(original_vertices_3d, axis=0)
-                    for i in range(num_pts):
-                        p1 = simplified_ring_3d[i]
-                        p2 = simplified_ring_3d[(i + 1) % num_pts]
-                        new_ring.append(p1)
-                        segment_length = np.linalg.norm(p2 - p1)
-                        if segment_length < 1e-5:
+            if not shapely_polys:
+                raise ValueError("All projected polygons are empty")
+
+            eps = 1e-3
+            union_result = unary_union([p.buffer(eps) for p in shapely_polys]).buffer(-eps)
+
+            # Keep ALL pieces of a MultiPolygon — discarding any piece would
+            # silently lose geometry and break downstream scripts.
+            if union_result.geom_type == 'MultiPolygon':
+                poly_pieces = list(union_result.geoms)
+            elif union_result.geom_type == 'Polygon':
+                poly_pieces = [union_result]
+            else:
+                raise ValueError(f"Unexpected union geometry type: {union_result.geom_type}")
+
+            def raw_proj_to_3d(coords_2d_arr):
+                """Back-project 2D coords to 3D WITHOUT vertex snapping.
+                Used only for winding-order checks so snapping noise can't
+                corrupt the normal direction test."""
+                return coords_2d_arr @ eigenvectors[:, :2].T + centroid
+
+            def snap_ring(pts_3d):
+                """Snap 3D points to nearest original vertex (within 0.1 m)."""
+                snapped = []
+                for pt in pts_3d:
+                    dists = np.linalg.norm(combined_vertices - pt, axis=1)
+                    min_idx = np.argmin(dists)
+                    snapped.append(
+                        combined_vertices[min_idx] if dists[min_idx] < 0.1 else pt
+                    )
+                return np.array(snapped)
+
+            def restore_collinear_vertices(simplified_ring_3d, original_vertices_3d, tol=1e-3):
+                """Re-inject original vertices that lie exactly on the simplified segments
+                to prevent T-junction cracks with unmerged adjacent surfaces."""
+                new_ring = []
+                num_pts = len(simplified_ring_3d)
+                unique_orig = np.unique(original_vertices_3d, axis=0)
+                for i in range(num_pts):
+                    p1 = simplified_ring_3d[i]
+                    p2 = simplified_ring_3d[(i + 1) % num_pts]
+                    new_ring.append(p1)
+                    segment_length = np.linalg.norm(p2 - p1)
+                    if segment_length < 1e-5:
+                        continue
+                    collinear_pts = []
+                    for v in unique_orig:
+                        if np.linalg.norm(v - p1) < tol or np.linalg.norm(v - p2) < tol:
                             continue
-                        collinear_pts = []
-                        for v in unique_orig:
-                            if np.linalg.norm(v - p1) < tol or np.linalg.norm(v - p2) < tol:
-                                continue
-                            d1 = np.linalg.norm(v - p1)
-                            d2 = np.linalg.norm(v - p2)
-                            if abs((d1 + d2) - segment_length) < tol:
-                                collinear_pts.append((d1, v))
-                        collinear_pts.sort(key=lambda x: x[0])
-                        for _, v in collinear_pts:
-                            new_ring.append(v)
-                    return np.array(new_ring)
+                        d1 = np.linalg.norm(v - p1)
+                        d2 = np.linalg.norm(v - p2)
+                        if abs((d1 + d2) - segment_length) < tol:
+                            collinear_pts.append((d1, v))
+                    collinear_pts.sort(key=lambda x: x[0])
+                    for _, v in collinear_pts:
+                        new_ring.append(v)
+                return np.array(new_ring)
 
-                for union_poly in union_polys_list:
-                    if union_poly.is_empty:
+            def project_ring_to_plane(ring_3d, plane_pt, plane_normal):
+                """Force a ring onto the reference wall plane to avoid non-planar artifacts."""
+                n = plane_normal / (np.linalg.norm(plane_normal) + 1e-12)
+                projected = []
+                for p in ring_3d:
+                    dist = np.dot(n, p - plane_pt)
+                    projected.append(p - dist * n)
+                return np.array(projected)
+
+            # Keep a local orientation reference from original input surfaces.
+            # For each merged piece, we pick the nearest original wall and use
+            # that wall's normal as the winding reference for the piece.
+            source_centers = np.array([wall_surfaces[idx].get_center() for idx in group])
+            source_normals = np.array([wall_surfaces[idx].get_normal() for idx in group])
+
+            produced = 0
+            piece_surfaces = []
+            for upoly in poly_pieces:
+                exterior_2d = np.array(upoly.exterior.coords[:-1])
+
+                piece_center_2d = np.array(upoly.representative_point().coords[0])
+                piece_center_3d = raw_proj_to_3d(np.array([piece_center_2d]))[0]
+                nearest_idx = int(np.argmin(np.linalg.norm(source_centers - piece_center_3d, axis=1)))
+                piece_ref_normal = source_normals[nearest_idx]
+
+                # ── Winding check on clean projected coords (no snapping yet).
+                # Match each merged piece to the nearest original wall normal.
+                # This preserves the raw JSON face direction even in courtyard
+                # layouts where a global group average can be ambiguous.
+                raw_ext_3d = raw_proj_to_3d(exterior_2d)
+                raw_normal = get_poly_normal(raw_ext_3d)
+                if np.dot(raw_normal, piece_ref_normal) < 0:
+                    exterior_2d = exterior_2d[::-1]
+                    raw_ext_3d = raw_ext_3d[::-1]
+
+                # Primary build: snap to source vertices for roofline continuity,
+                # removing the re-projection step so we don't flatten the roofline bulges.
+                exterior_3d = snap_ring(raw_ext_3d)
+                exterior_3d = restore_collinear_vertices(exterior_3d, combined_vertices)
+                exterior_normal = get_poly_normal(exterior_3d)
+                if np.dot(exterior_normal, piece_ref_normal) < 0:
+                    exterior_3d = exterior_3d[::-1]
+                    exterior_normal = -exterior_normal
+
+                final_rings_3d = [exterior_3d]
+
+                for interior in upoly.interiors:
+                    interior_2d = np.array(interior.coords[:-1])
+                    if ShapelyPolygon(interior_2d).area < 0.05:
                         continue
-                    
-                    exterior_2d = np.array(union_poly.exterior.coords[:-1])
-                    exterior_3d = proj_to_3d(exterior_2d)
-                    exterior_3d = restore_collinear_vertices(exterior_3d, combined_vertices)
+                    # Holes must wind OPPOSITE to the exterior (inward normal).
+                    raw_int_3d = raw_proj_to_3d(interior_2d)
+                    raw_int_normal = get_poly_normal(raw_int_3d)
+                    if np.dot(raw_int_normal, exterior_normal) > 0:
+                        interior_2d = interior_2d[::-1]
+                        raw_int_3d = raw_int_3d[::-1]
+                    int_3d = snap_ring(raw_int_3d)
+                    int_3d = restore_collinear_vertices(int_3d, combined_vertices)
+                    final_rings_3d.append(int_3d)
 
-                    # Orient exterior ring: prefer centroid-based outward check,
-                    # fall back to aligning with the pre-oriented group_normal.
-                    if building_centroid is not None:
-                        exterior_3d = ensure_outward_winding(exterior_3d, building_centroid)
-                    else:
-                        new_normal = newell_normal(exterior_3d)
-                        if np.dot(new_normal, group_normal) < 0:
-                            exterior_3d = exterior_3d[::-1]
+                candidate = WallSurface(
+                    final_rings_3d,
+                    semantic_val=wall_surfaces[group[0]].semantic_val
+                )
 
-                    outward_normal = newell_normal(exterior_3d)
-                    final_rings_3d = [exterior_3d]
-
-                    # Recreate interior holes — must wind OPPOSITE to exterior ring.
-                    for interior in union_poly.interiors:
+                # If snapped+planar candidate is still invalid, keep merged wall
+                # by rebuilding this piece from unsnapped projected geometry.
+                if not _surface_is_valid_for_export(candidate):
+                    fallback_rings = [restore_collinear_vertices(raw_ext_3d, combined_vertices, tol=2e-3)]
+                    for interior in upoly.interiors:
                         interior_2d = np.array(interior.coords[:-1])
-                        int_poly = ShapelyPolygon(interior_2d)
-                        if int_poly.area < 0.05:
+                        if ShapelyPolygon(interior_2d).area < 0.05:
                             continue
+                        raw_int_3d = raw_proj_to_3d(interior_2d)
+                        if np.dot(get_poly_normal(raw_int_3d), get_poly_normal(raw_ext_3d)) > 0:
+                            raw_int_3d = raw_int_3d[::-1]
+                        raw_int_3d = restore_collinear_vertices(raw_int_3d, combined_vertices, tol=2e-3)
+                        fallback_rings.append(raw_int_3d)
 
-                        interior_3d = proj_to_3d(interior_2d)
-                        interior_3d = restore_collinear_vertices(interior_3d, combined_vertices)
-                        
-                        int_normal = newell_normal(interior_3d)
-                        # Interior ring normal must point inward (opposite to outward_normal).
-                        if np.dot(int_normal, outward_normal) > 0:
-                            interior_3d = interior_3d[::-1]
+                    fallback_candidate = WallSurface(
+                        fallback_rings,
+                        semantic_val=wall_surfaces[group[0]].semantic_val
+                    )
 
-                        final_rings_3d.append(interior_3d)
-                    
-                    merged_surface = WallSurface(final_rings_3d, semantic_val=wall_surfaces[group[0]].semantic_val)
-                    merged_surfaces.append(merged_surface)
-                
-                merge_count += len(group) - 1
-                if obj_id:
-                    print(f"  ✓ Merged {len(group)} surfaces in {obj_id}")
-                else:
-                    print(f"  ✓ Merged {len(group)} surfaces")
-                    
-            except Exception as e:
-                print(f"  ⚠ Warning: Could not merge group of {len(group)} surfaces: {e}")
-                for idx in group:
-                    merged_surfaces.append(wall_surfaces[idx])
-    
+                    if _surface_is_valid_for_export(fallback_candidate):
+                        print(f"  ⚠ Rebuilt merged piece without snapping in {obj_id or 'object'}")
+                        candidate = fallback_candidate
+                    else:
+                        # Final fallback: keep merged exterior and drop problematic
+                        # holes for this piece so we retain facade continuity.
+                        exterior_only = WallSurface(
+                            [raw_ext_3d],
+                            semantic_val=wall_surfaces[group[0]].semantic_val
+                        )
+                        if _surface_is_valid_for_export(exterior_only):
+                            print(f"  ⚠ Rebuilt merged piece as exterior-only in {obj_id or 'object'}")
+                            candidate = exterior_only
+                        else:
+                            # Last resort patch: keep merged intent by filling with
+                            # a convex-hull face in the same wall plane.
+                            patch_poly = upoly.convex_hull
+                            if patch_poly.is_empty or patch_poly.geom_type != 'Polygon':
+                                print(f"  ⚠ Skipped unrepairable merged piece in {obj_id or 'object'}")
+                                continue
+
+                            patch_2d = np.array(patch_poly.exterior.coords[:-1])
+                            patch_3d = project_ring_to_plane(
+                                raw_proj_to_3d(patch_2d),
+                                raw_ext_3d[0],
+                                piece_ref_normal,
+                            )
+                            if np.dot(get_poly_normal(patch_3d), piece_ref_normal) < 0:
+                                patch_3d = patch_3d[::-1]
+
+                            patch_candidate = WallSurface(
+                                [patch_3d],
+                                semantic_val=wall_surfaces[group[0]].semantic_val
+                            )
+                            if _surface_is_valid_for_export(patch_candidate):
+                                print(f"  ⚠ Patched merged piece via convex hull in {obj_id or 'object'}")
+                                candidate = patch_candidate
+                            else:
+                                # Never fall back to original faces; skip only if
+                                # no merged repair could be made.
+                                print(f"  ⚠ Skipped unrepairable merged piece in {obj_id or 'object'}")
+                                continue
+
+                piece_surfaces.append(candidate)
+                produced += 1
+
+            merged_surfaces.extend(piece_surfaces)
+
+            merge_count += len(group) - produced
+            label = obj_id if obj_id else "object"
+            print(f"  ✓ Merged {len(group)} → {produced} surface(s) in {label}")
+
+        except Exception as e:
+            print(f"  ⚠ Warning: Could not merge group of {len(group)} surfaces: {e}")
+            for idx in group:
+                merged_surfaces.append(wall_surfaces[idx])
+
     return merged_surfaces, merge_count
 
 
@@ -412,20 +615,14 @@ def process_cityjson(cm: dict, normal_threshold: float, distance_threshold: floa
         return result
 
     for obj_id, obj in cm.get("CityObjects", {}).items():
-        # Compute minimum Z and XYZ centroid across all geometry of this object.
+        # Compute minimum Z across all geometry of this object
         obj_z_min = float('inf')
-        bldg_verts_all = []
         for geom in obj.get("geometry", []):
             indices = list(get_indices(geom.get("boundaries", [])))
             if indices:
-                unique_idx = list(set(indices))
-                z_vals = [world_verts[i][2] for i in unique_idx]
+                z_vals = [world_verts[i][2] for i in set(indices)]
                 if z_vals:
                     obj_z_min = min(obj_z_min, min(z_vals))
-                bldg_verts_all.extend(world_verts[i] for i in unique_idx)
-
-        bldg_centroid = (np.mean(np.array(bldg_verts_all), axis=0)
-                         if bldg_verts_all else None)
 
         for geom in obj.get("geometry", []):
             geom_type = geom.get("type")
@@ -508,25 +705,7 @@ def process_cityjson(cm: dict, normal_threshold: float, distance_threshold: floa
                             poly_z_min = np.min(ext_coords[:, 2])
 
                             if poly_z_min <= obj_z_min + ground_tolerance:
-                                # ── Correct exterior ring winding (outward normal) ──
-                                corrected_polygon = [list(r) for r in polygon]
-                                if bldg_centroid is not None:
-                                    oriented = ensure_outward_winding(ext_coords, bldg_centroid)
-                                    if not np.array_equal(oriented, ext_coords):
-                                        ext_coords = oriented
-                                        corrected_polygon[0] = list(reversed(polygon[0]))
-                                    rings_coords[0] = ext_coords
-
-                                # ── Correct interior ring winding (opposite to exterior) ──
-                                ext_normal = newell_normal(rings_coords[0])
-                                for ri in range(1, len(rings_coords)):
-                                    int_coords = rings_coords[ri]
-                                    if np.dot(newell_normal(int_coords), ext_normal) > 0:
-                                        rings_coords[ri] = int_coords[::-1]
-                                        corrected_polygon[ri] = list(reversed(polygon[ri]))
-
-                                ws = WallSurface(rings_coords, semantic_val=p_val,
-                                                 original_polygon=corrected_polygon)
+                                ws = WallSurface(rings_coords, semantic_val=p_val, original_polygon=polygon)
                                 wall_surfaces.append(ws)
                                 wall_poly_indices.append(pi)
                                 total_original += 1
@@ -544,8 +723,7 @@ def process_cityjson(cm: dict, normal_threshold: float, distance_threshold: floa
                 # Merge the collected wall surfaces
                 if wall_surfaces:
                     merged, _ = merge_wall_surfaces(
-                        wall_surfaces, normal_threshold, distance_threshold,
-                        obj_id=obj_id, building_centroid=bldg_centroid
+                        wall_surfaces, normal_threshold, distance_threshold, obj_id=obj_id
                     )
                     total_merged += len(merged)
 
@@ -606,11 +784,6 @@ def process_cityjson(cm: dict, normal_threshold: float, distance_threshold: floa
                             all_new_vals_flat.append(v)
 
             used_surface_indices = set(v for v in all_new_vals_flat if v is not None)
-
-            # Always keep ALL WallSurface definitions so that non-ground walls
-            # (which were passed through unchanged with their original semantic_val)
-            # never reference a pruned index after compaction.
-            used_surface_indices.update(wall_semantic_indices)
 
             # Expand used set to include parents of used children and children of used parents
             expanded = set(used_surface_indices)
@@ -680,10 +853,10 @@ def main():
     )
     parser.add_argument('--input_file', type=str,
                        help='Path to input CityJSON file (if not provided, will prompt for selection)')
-    parser.add_argument('--input_dir', type=str, default=DEFAULT_INPUT_DIR,
-                       help=f'Directory containing input JSON files (default: {DEFAULT_INPUT_DIR})')
-    parser.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR,
-                       help=f'Output directory for merged JSON files (default: {DEFAULT_OUTPUT_DIR})')
+    parser.add_argument('--input_dir', type=str, default="data/lod_2",
+                       help=f'Directory containing input JSON files (default: data/lod_2)')
+    parser.add_argument('--output_dir', type=str, default="outputs/00_json_wall_merged",
+                       help=f'Output directory for merged JSON files (default: outputs/00_json_wall_merged)')
     parser.add_argument('--normal_threshold', type=float, default=5.0,
                        help='Normal angle threshold in degrees (default: 5.0)')
     parser.add_argument('--distance_threshold', type=float, default=2.0,
@@ -733,7 +906,7 @@ def main():
     output_path = os.path.join(args.output_dir, output_filename)
     
     print(f"\nWriting merged JSON file...")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
     
     # Enforce CityJSON structural key order matching the target format:
     # type → version → CityObjects → transform → vertices → metadata → appearance → (rest)

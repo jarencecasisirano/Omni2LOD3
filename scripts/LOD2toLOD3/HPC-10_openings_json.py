@@ -609,9 +609,9 @@ def main():
     # =====================================================================
     # HPC HARDCODED INPUTS
     # =====================================================================
-    HARDCODED_JSON_PATH = "/home/khalil.torneros/ICHEM/ichem_021726.json"
-    HARDCODED_LAS_PATH  = "/home/khalil.torneros/ICHEM/ICHEM-window.las"
-    HARDCODED_FEATURE_TYPE = "window"
+    HARDCODED_JSON_PATH       = "/home/khalil.torneros/NIMBB/NIMBB-demi_merged.json"
+    HARDCODED_WINDOW_LAS_PATH = "/home/khalil.torneros/NIMBB/windows_flat-2.las"
+    HARDCODED_DOOR_LAS_PATH   = "/home/khalil.torneros/NIMBB/doors_flat-2.las"
     # =====================================================================
 
     parser = argparse.ArgumentParser(
@@ -650,9 +650,12 @@ def main():
         sys.exit(1)
 
     # ── 2. Collect point cloud inputs ─────────────────────────────────
-    las_inputs = [(HARDCODED_LAS_PATH, HARDCODED_FEATURE_TYPE)]
+    las_inputs = [
+        (HARDCODED_WINDOW_LAS_PATH, "window"),
+        (HARDCODED_DOOR_LAS_PATH,   "door"),
+    ]
 
-    print(f"\n  [HPC MODE] Using hardcoded point cloud:")
+    print(f"\n  [HPC MODE] Using hardcoded point clouds:")
     for lp, ft in las_inputs:
         print(f"    {os.path.basename(lp):50s} → {ft}")
 

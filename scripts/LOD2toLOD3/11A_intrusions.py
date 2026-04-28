@@ -68,7 +68,7 @@ except ImportError:
 
 # ─── Directories ──────────────────────────────────────────────────────────────
 LAS_DIR    = "outputs/11B_flat"
-JSON_DIR   = "outputs/13_openings_json"
+JSON_DIR   = "outputs/00_json_wall_merged"
 OUTPUT_DIR = "outputs/13_intrusions_json"
 
 # ─── Tuning constants ─────────────────────────────────────────────────────────

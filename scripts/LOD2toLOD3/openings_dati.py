@@ -49,7 +49,7 @@ from sklearn.cluster import DBSCAN
 # Directories
 # =====================================================================
 LAS_DIR    = "outputs/11B_flat"
-JSON_DIR   = "outputs/13_intrusions_json"
+JSON_DIR   = "outputs/00_json_wall_merged"
 OUTPUT_DIR = "outputs/13_openings_json"
 
 # Vertical-surface detection tolerance:
@@ -303,17 +303,17 @@ def _pca_normal_2d(points):
     return np.array([-tang[1], tang[0]])
 
 
-def find_matched_surfaces(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
+def find_matched_surface(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
     """
-    3-stage matching — returns a list of matched_surfaces.
+    3-stage matching — returns (matched_surface | None).
 
     Stage 1 – Spatial intersection (Z-overlap + signed centroid distance
-              + XY footprint check). Returns all intersecting surfaces.
+              + XY footprint check).  Picks smallest |distance|.
     Stage 2 – PCA normal alignment fallback.
     Stage 3 – Nearest-centroid unconditional fallback.
     """
     if not vert_surfaces:
-        return []
+        return None
 
     cl_z_min = float(points[:, 2].min())
     cl_z_max = float(points[:, 2].max())
@@ -321,7 +321,8 @@ def find_matched_surfaces(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
     cxy       = centroid[:2]
 
     # Stage 1
-    matched = []
+    best_surf = None
+    best_dist = float("inf")
     for vs in vert_surfaces:
         if cl_z_max < vs["z_min"] - z_expand or cl_z_min > vs["z_max"] + z_expand:
             continue
@@ -336,12 +337,15 @@ def find_matched_surfaces(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
                 proj_xy[1] < vs["xy_min"][1] - pad or
                 proj_xy[1] > vs["xy_max"][1] + pad):
             continue
-        matched.append((abs(d), vs))
+        if abs(d) < best_dist:
+            best_dist = abs(d)
+            best_surf = vs
 
-    if matched:
-        matched.sort(key=lambda x: x[0])
-        print(f"[Stage1: {len(matched)} surface(s)]", end=" ")
-        return [m[1] for m in matched]
+    if best_surf is not None:
+        angle = np.degrees(np.arctan2(best_surf["normal_2d"][1],
+                                      best_surf["normal_2d"][0]))
+        print(f"[Stage1: dist={best_dist:.2f} m, angle={angle:+.1f}°]", end=" ")
+        return best_surf
 
     # Stage 2 – PCA normal alignment
     pca_n = _pca_normal_2d(points)
@@ -356,7 +360,7 @@ def find_matched_surfaces(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
             angle = np.degrees(np.arctan2(best_surf["normal_2d"][1],
                                           best_surf["normal_2d"][0]))
             print(f"[Stage2: align={best_dot:.3f}, angle={angle:+.1f}°]", end=" ")
-            return [best_surf]
+            return best_surf
 
     # Stage 3 – nearest centroid
     for vs in vert_surfaces:
@@ -366,8 +370,7 @@ def find_matched_surfaces(points, vert_surfaces, dist_tol=2.0, z_expand=0.5):
             best_surf = vs
     if best_surf is not None:
         print("[Stage3: nearest-centroid fallback]", end=" ")
-        return [best_surf]
-    return []
+    return best_surf
 
 
 # =====================================================================
@@ -528,9 +531,9 @@ def punch_hole_and_create_opening(cm, int_verts, scale, translate,
         p_xy = wd_h * n2d_h + t * txy_h
         return (float(p_xy[0]), float(p_xy[1]), float(z))
 
-    # CCW interior ring (hole) when viewed from outside
-    hole_pts = [hwpt(t_lo, z_lo), hwpt(t_hi, z_lo),
-                hwpt(t_hi, z_hi), hwpt(t_lo, z_hi)]
+    # CW interior ring (hole) when viewed from outside
+    hole_pts = [hwpt(t_lo, z_hi), hwpt(t_hi, z_hi),
+                hwpt(t_hi, z_lo), hwpt(t_lo, z_lo)]
 
     start_idx    = len(int_verts)
     for pt in hole_pts:
@@ -605,13 +608,9 @@ def punch_hole_and_create_opening(cm, int_verts, scale, translate,
 def main():
     parser = argparse.ArgumentParser(
         description="Facade Features → CityJSON LOD3")
-    parser.add_argument("--eps",        type=float, default=0.3,
-                        help="Global DBSCAN eps default (neighbourhood radius, default 0.3)")
-    parser.add_argument("--window_eps", type=float, default=0.5,
-                        help="DBSCAN eps for windows (overrides --eps)")
-    parser.add_argument("--door_eps",   type=float, default=0.3,
-                        help="DBSCAN eps for doors (overrides --eps)")
-    parser.add_argument("--min_samples", type=int,  default=10,
+    parser.add_argument("--eps",        type=float, default=3.0,
+                        help="DBSCAN eps (neighbourhood radius, default 0.3)")
+    parser.add_argument("--min_samples", type=int,  default=30,
                         help="DBSCAN min_samples (default 30)")
     parser.add_argument("--output", "-o", type=str,  default=None,
                         help="Output filename (saved in outputs/13_openings_json/). "
@@ -666,8 +665,8 @@ def main():
 
     # ── 3. DBSCAN + wall projection ────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  CLUSTERING + SURFACE PROJECTION  (min_samples={args.min_samples})")
-    print(f"  Defaults: eps={args.eps} (window={args.window_eps}, door={args.door_eps})")
+    print(f"  CLUSTERING + SURFACE PROJECTION  "
+          f"(eps={args.eps}, min_samples={args.min_samples})")
     print(f"{'='*60}")
 
     # surface_opening_map[surf_idx] = {
@@ -686,14 +685,8 @@ def main():
         points = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
         print(f"    Points loaded: {len(points):,}")
 
-        # Use feature-specific eps if provided, otherwise fallback to global eps
-        if user_ftype == "window":
-            cur_eps = args.window_eps if args.window_eps is not None else args.eps
-        else:
-            cur_eps = args.door_eps if args.door_eps is not None else args.eps
-
         feats = cluster_features(points, user_ftype,
-                                 eps=cur_eps, min_samples=args.min_samples)
+                                 eps=args.eps, min_samples=args.min_samples)
         if not feats:
             print("    No clusters found — skipping this cloud.")
             continue
@@ -707,36 +700,38 @@ def main():
             print(f"\n    [{feat_counter}] {ftype:8s}  {n_pts:>8,} pts  ", end="")
 
             # 3-stage surface matching
-            matched_surfs = find_matched_surfaces(feat["points"], vert_surfaces,
+            matched = find_matched_surface(feat["points"], vert_surfaces,
                                            dist_tol=2.0, z_expand=0.5)
 
-            if not matched_surfs:
+            if matched is None:
                 # No vertical surface at all — skip (rare)
                 print("→ no surface found, skipped")
                 continue
 
-            for matched in matched_surfs:
-                proj = compute_surface_projection(feat["points"], matched)
-                if not proj:
-                    print(f"→ projection degenerate on surface {matched['idx']}, skipped")
-                    continue
+            # Try nearest-wall fallback if Stage 1/2 failed (matched still None
+            # inside find_matched_surface already handles this via Stage 3).
 
-                sidx    = matched["idx"]
-                feat_id = f"{ftype}_{feat_counter}_{uuid.uuid4().hex[:8]}"
+            proj = compute_surface_projection(feat["points"], matched)
+            if not proj:
+                print("→ projection degenerate, skipped")
+                continue
 
-                if sidx not in surface_opening_map:
-                    surface_opening_map[sidx] = {
-                        "surface":  matched,
-                        "openings": [],
-                    }
-                surface_opening_map[sidx]["openings"].append(
-                    (proj, ftype, feat_id))
+            sidx    = matched["idx"]
+            feat_id = f"{ftype}_{feat_counter}_{uuid.uuid4().hex[:8]}"
 
-                summary[ftype] = summary.get(ftype, 0) + 1
-                wall_angle = np.degrees(np.arctan2(
-                    matched["normal_2d"][1], matched["normal_2d"][0]))
-                print(f"→ projected onto surface {sidx} "
-                      f"(obj '{matched['obj_id']}', angle={wall_angle:+.1f}°)")
+            if sidx not in surface_opening_map:
+                surface_opening_map[sidx] = {
+                    "surface":  matched,
+                    "openings": [],
+                }
+            surface_opening_map[sidx]["openings"].append(
+                (proj, ftype, feat_id))
+
+            summary[ftype] = summary.get(ftype, 0) + 1
+            wall_angle = np.degrees(np.arctan2(
+                matched["normal_2d"][1], matched["normal_2d"][0]))
+            print(f"→ projected onto surface {sidx} "
+                  f"(obj '{matched['obj_id']}', angle={wall_angle:+.1f}°)")
 
     if not surface_opening_map:
         print("\n  No openings created. Nothing to write.")
@@ -744,11 +739,11 @@ def main():
 
     # ── 4. Apply holes + create opening CityObjects ────────────────────
     total_raw      = sum(len(d["openings"]) for d in surface_opening_map.values())
-    print(f"\n  Deduplicating overlapping openings (any overlap → keep larger) ...")
+    print(f"\n  Deduplicating overlapping openings (IoU > 0.30) ...")
     n_suppressed = 0
     for data in surface_opening_map.values():
         raw      = data["openings"]
-        deduped  = deduplicate_openings(raw, iou_threshold=0.0)
+        deduped  = deduplicate_openings(raw, iou_threshold=0.30)
         dropped  = len(raw) - len(deduped)
         n_suppressed += dropped
         data["openings"] = deduped

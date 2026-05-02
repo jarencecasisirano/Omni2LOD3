@@ -511,8 +511,12 @@ def punch_wall_hole(cm, int_verts, scale, translate, surface, bbox):
     if t_hi_p <= t_lo_p or z_hi_p <= z_lo_p:
         return None   # hole doesn't fit inside this panel
 
-    # Use the PANEL's own wall-plane depth so the ring sits flush
-    d = surface["wall_d"]
+    # Project the panel's centroid onto the BBOX's own n2d axis so the
+    # hole ring sits flush on the panel's plane while staying in the
+    # bbox coordinate frame (n2d, txy).  Using surface["wall_d"] directly
+    # would be wrong when the panel's own normal_2d differs from n2d,
+    # because wall_d = dot(centroid, panel_normal) ≠ dot(centroid, n2d).
+    d = float(np.dot(surface["origin_2d"], n2d))
 
     def wpt(t, z):
         xy = d * n2d + t * txy
@@ -557,16 +561,21 @@ def find_all_overlapping_surfaces(vert_surfaces, bbox, matched,
     """
     Return all wall surfaces that:
       • Share the same facade orientation as `matched` (cos ≥ normal_tol).
-      • Lie on the same wall plane (|wall_d difference| ≤ depth_tol).
+      • Lie on the same wall plane (relative depth ≤ depth_tol).
       • Have a Z range that overlaps the recess opening [z_lo, z_hi].
       • Have a tangential extent that overlaps the recess opening [t_lo, t_hi].
+
+    Depth comparison uses the *relative* signed distance of each candidate
+    panel's centroid from the matched panel's plane, measured along the
+    bbox normal.  This avoids the huge absolute wall_d values that arise
+    with UTM coordinates and makes depth_tol meaningful in metres.
 
     Parameters
     ----------
     normal_tol : float
-        Minimum cosine similarity between normals (default 0.95 ≈ 18°).
+        Minimum cosine similarity between normals (default 0.80 ≈ 37°).
     depth_tol : float
-        Max wall-plane depth difference allowed (metres, default 0.30).
+        Max relative depth difference allowed (metres, default 0.30).
     """
     n2d    = bbox["n2d"]
     txy    = bbox["txy"]
@@ -574,15 +583,18 @@ def find_all_overlapping_surfaces(vert_surfaces, bbox, matched,
     t_hi   = bbox["t_hi"]
     z_lo   = bbox["z_lo"]
     z_hi   = bbox["z_hi"]
-    wall_d = matched["wall_d"]
+
+    # Reference point on the matched wall plane
+    ref_origin = matched["origin_2d"]
 
     overlapping = []
     for vs in vert_surfaces:
         # Same facade direction
         if float(np.dot(vs["normal_2d"], n2d)) < normal_tol:
             continue
-        # Same wall-plane depth
-        if abs(vs["wall_d"] - wall_d) > depth_tol:
+        # Same wall-plane depth — relative distance from matched plane
+        rel_depth = float(np.dot(vs["origin_2d"] - ref_origin, n2d))
+        if abs(rel_depth) > depth_tol:
             continue
         # Vertical overlap
         if vs["z_max"] < z_lo - 0.05 or vs["z_min"] > z_hi + 0.05:

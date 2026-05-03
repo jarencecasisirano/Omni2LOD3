@@ -278,6 +278,49 @@ def parse_vertical_surfaces(cm, world_verts):
 
 
 # =====================================================================
+# Filter walls to keep only those nearest the point-cloud median
+# =====================================================================
+def filter_walls_by_median(vert_surfaces, median_xy, angle_tol=10.0,
+                           dist_margin=2.0):
+    """
+    Among walls with similar normals (parallel), keep only those whose
+    plane is closest to the point-cloud median XY.  This prevents the
+    extrusion from snapping to a distant parallel wall and stretching
+    across the entire building.
+
+    Steps
+    -----
+    1. Group walls by their outward-normal angle (full-360° bins of
+       *angle_tol* degrees — opposite-facing walls stay separate).
+    2. Within each group, compute the absolute distance from the
+       point-cloud median to each wall plane.
+    3. Keep only walls within *dist_margin* metres of the closest wall
+       in that group.
+    """
+    groups: dict[int, list] = {}
+    for vs in vert_surfaces:
+        angle = np.degrees(np.arctan2(vs["normal_2d"][1],
+                                      vs["normal_2d"][0]))
+        key = round(angle / angle_tol) * int(angle_tol)
+        groups.setdefault(key, []).append(vs)
+
+    kept = []
+    for key, group in groups.items():
+        dists = []
+        for vs in group:
+            d = abs(float(np.dot(median_xy, vs["normal_2d"])) - vs["wall_d"])
+            dists.append(d)
+
+        min_d = min(dists)
+        threshold = min_d + dist_margin
+        for vs, d in zip(group, dists):
+            if d <= threshold:
+                kept.append(vs)
+
+    return kept
+
+
+# =====================================================================
 # 3-stage wall surface matching
 # =====================================================================
 def _pca_normal_2d(points):
@@ -525,13 +568,65 @@ def build_extrusion_boundaries(bbox, int_verts, scale, translate):
 
 
 # =====================================================================
+# Filter degenerate faces (no cluster points nearby)
+# =====================================================================
+def filter_degenerate_faces(bbox, cluster_pts, face_boundaries,
+                            proximity_tol=0.5):
+    """
+    Remove extrusion faces that have no cluster points nearby.
+
+    For each face, compute the distance from every cluster point to the
+    face plane and check whether any point lies within the face's XY/Z
+    bounding rectangle (with *proximity_tol* padding).  Faces with zero
+    nearby points are considered degenerate and dropped.
+
+    Returns (kept_boundaries, kept_sem_indices).
+    """
+    corners = bbox["corners"]
+    kept_boundaries   = []
+    kept_sem_indices  = []
+
+    for fi, face_idx_list in enumerate(_EXTRUSION_FACE_IDX):
+        fc = corners[face_idx_list]          # (4, 3)
+        fc_centre = fc.mean(axis=0)          # face centroid
+        fc_half   = np.abs(fc - fc_centre).max(axis=0) + proximity_tol
+
+        # Quick AABB proximity check
+        diff = np.abs(cluster_pts - fc_centre)           # (N, 3)
+        mask = np.all(diff <= fc_half, axis=1)
+        if mask.any():
+            kept_boundaries.append(face_boundaries[fi])
+            kept_sem_indices.append(fi)
+
+    return kept_boundaries, kept_sem_indices
+
+
+# =====================================================================
 # Add BuildingInstallation CityObject
 # =====================================================================
-def add_installation(cm, install_id, parent_id, poly_boundaries):
+def add_installation(cm, install_id, parent_id, poly_boundaries,
+                     sem_indices=None):
     """
     Create a BuildingInstallation CityObject and link it to its parent.
+
+    *sem_indices* maps each kept boundary to its original face index
+    in _FACE_SEMANTICS.  If None, assumes [0..n).
     """
     n = len(poly_boundaries)
+    if sem_indices is None:
+        sem_indices = list(range(n))
+
+    # Build a compact semantic surface list for the kept faces only
+    unique_types = []
+    type_map     = {}   # original sem index → compact index
+    values       = []
+    for orig_i in sem_indices:
+        stype = _FACE_SEMANTICS[orig_i]
+        if stype not in type_map:
+            type_map[stype] = len(unique_types)
+            unique_types.append({"type": stype})
+        values.append(type_map[stype])
+
     cm["CityObjects"][install_id] = {
         "type":    "BuildingInstallation",
         "parents": [parent_id],
@@ -540,8 +635,8 @@ def add_installation(cm, install_id, parent_id, poly_boundaries):
             "lod":        "3",
             "boundaries": poly_boundaries,
             "semantics": {
-                "surfaces": [{"type": _FACE_SEMANTICS[i]} for i in range(n)],
-                "values":   list(range(n)),
+                "surfaces": unique_types,
+                "values":   values,
             },
         }],
     }
@@ -617,6 +712,17 @@ def main():
     points = np.vstack((las.x, las.y, las.z)).T.astype(np.float64)
     print(f"  {len(points):,} points loaded.")
 
+    # ── 4b. Filter walls to those nearest point-cloud median ──────────
+    median_xy = np.array([np.median(points[:, 0]),
+                          np.median(points[:, 1])])
+    print(f"\n  Point-cloud median XY: "
+          f"({median_xy[0]:.2f}, {median_xy[1]:.2f})")
+
+    n_before = len(vert_surfaces)
+    vert_surfaces = filter_walls_by_median(vert_surfaces, median_xy)
+    print(f"  Wall filter: {n_before} -> {len(vert_surfaces)} surface(s) "
+          f"(kept nearest to median)")
+
     # ── 5. DBSCAN ─────────────────────────────────────────────────────
     print(f"\n  Running DBSCAN "
           f"(eps={args.eps}, min_samples={args.min_samples}) ...")
@@ -668,7 +774,7 @@ def main():
                     "xy_max":    cluster_pts[:, :2].max(axis=0),
                 }
             else:
-                print("  → SKIP: no matching wall surface found.")
+                print("  -> SKIP: no matching wall surface found.")
                 n_skipped += 1
                 continue
 
@@ -681,7 +787,7 @@ def main():
         clip = clip_bbox_at_wall(cluster_pts, matched)
 
         if clip is None:
-            print("  → SKIP: cluster lies entirely inside the building "
+            print("  -> SKIP: cluster lies entirely inside the building "
                   "(no outward protrusion).")
             n_skipped += 1
             continue
@@ -694,8 +800,8 @@ def main():
         h_m = bbox["height_m"]
 
         if p_m < args.min_protrusion or w_m < 0.01 or h_m < 0.01:
-            print(f"  → SKIP: degenerate bbox "
-                  f"({p_m:.3f}m × {w_m:.3f}m × {h_m:.3f}m).")
+            print(f"  -> SKIP: degenerate bbox "
+                  f"({p_m:.3f}m x {w_m:.3f}m x {h_m:.3f}m).")
             n_skipped += 1
             continue
 
@@ -705,9 +811,19 @@ def main():
         # ── d. Create BuildingInstallation with 6 faces ───────────────
         feat_id    = f"extrusion_{cluster_idx}_{uuid.uuid4().hex[:8]}"
         boundaries = build_extrusion_boundaries(bbox, int_verts, scale, translate)
-        add_installation(cm, feat_id, parent_id, boundaries)
 
-        print(f"  → BuildingInstallation '{feat_id}' "
+        # Remove degenerate faces that contain no nearby points
+        boundaries, sem_idx = filter_degenerate_faces(
+            bbox, cluster_pts, boundaries)
+
+        if not boundaries:
+            print("  -> SKIP: all faces are degenerate (no nearby points).")
+            n_skipped += 1
+            continue
+
+        add_installation(cm, feat_id, parent_id, boundaries, sem_idx)
+
+        print(f"  -> BuildingInstallation '{feat_id}' "
               f"({len(boundaries)} face(s))")
         n_extruded += 1
 

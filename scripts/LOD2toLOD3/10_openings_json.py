@@ -613,6 +613,8 @@ def main():
                         help="DBSCAN eps for doors (overrides --eps)")
     parser.add_argument("--min_samples", type=int,  default=10,
                         help="DBSCAN min_samples (default 30)")
+    parser.add_argument("--dist_tol",   type=float, default=2.0,
+                        help="Distance tolerance for surface matching (default 2.0)")
     parser.add_argument("--output", "-o", type=str,  default=None,
                         help="Output filename (saved in outputs/13_openings_json/). "
                              "Defaults to <source_basename>_LOD3.json")
@@ -708,7 +710,7 @@ def main():
 
             # 3-stage surface matching
             matched_surfs = find_matched_surfaces(feat["points"], vert_surfaces,
-                                           dist_tol=2.0, z_expand=0.5)
+                                           dist_tol=args.dist_tol, z_expand=0.5)
 
             if not matched_surfs:
                 # No vertical surface at all — skip (rare)

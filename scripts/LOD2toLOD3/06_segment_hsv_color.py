@@ -8,11 +8,11 @@ Each cluster is assigned a distinct color in the output LAS file.
 Usage:
     conda activate lidar-test
     python scripts/LOD2toLOD3/06_segment_hsv_color.py \
-        --input outputs/07_merged_las/NIMBB-2-super-cleaned.las \
-        --output_dir outputs/08_segmented \
+        --input outputs/06_merged_las/NIMBB-2-super-cleaned.las \
+        --output_dir outputs/07_segmented \
         --n_clusters 5
 
-Output: outputs/08_segmented/color_segmented_<input_filename>.las
+Output: outputs/07_segmented/color_segmented_<input_filename>.las
 """
 
 import os
@@ -221,7 +221,7 @@ def main():
                         help="Input LAS file path")
     parser.add_argument("--input_dir", type=str, default=None,
                         help="Input directory of LAS files (overrides --input)")
-    parser.add_argument("--output_dir", type=str, default="outputs/08_segmented",
+    parser.add_argument("--output_dir", type=str, default="outputs/07_segmented",
                         help="Output directory")
     parser.add_argument("--n_clusters", type=int, default=5,
                         help="Number of color clusters")

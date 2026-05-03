@@ -137,8 +137,8 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, "../../"))
     
-    input_dir = os.path.join(project_root, "data", "google-street-view4")
-    output_dir = os.path.join(project_root, "data", "google-street-view-spherical-4")
+    input_dir = os.path.join(project_root, "data", "Google_street_view")
+    output_dir = os.path.join(project_root, "data", "Google_street_view/gsv_spherical-4")
     
     print(f"Input Directory:  {input_dir}")
     print(f"Output Directory: {output_dir}")

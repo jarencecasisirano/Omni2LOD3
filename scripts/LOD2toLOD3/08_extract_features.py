@@ -2,9 +2,9 @@
 """
 Extract Facade Features (remove Wall points).
 
-Loads a labelled point cloud from outputs/09_labelled, removes all points
+Loads a labelled point cloud from outputs/08_labelled, removes all points
 classified as Wall (code 2), and saves the remaining facade features
-(doors, windows, etc.) to outputs/10_facade_features.
+(doors, windows, etc.) to outputs/09_facade_features_classified.
 
 Usage:
     conda activate lidar-test
@@ -30,8 +30,8 @@ LABEL_MAP = {
 }
 LABEL_NAMES = {v: k.capitalize() for k, v in LABEL_MAP.items()}
 
-INPUT_DIR = "outputs/09_labelled"
-OUTPUT_DIR = "outputs/11_facade_features_classified"
+INPUT_DIR = "outputs/08_labelled"
+OUTPUT_DIR = "outputs/09_facade_features_classified"
 
 
 def select_file(directory):

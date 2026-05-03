@@ -39,7 +39,7 @@ def select_file_from_dir(prompt_msg, directory, extension):
 def select_files():
     """Handles terminal selection for LAS and CityJSON files."""
     las_dir = "outputs/11A_facade_curve"
-    json_dir = "outputs/12_curve_json"
+    json_dir = "outputs/15_curve_openings_json"
 
     las_path = select_file_from_dir("Select the LAS file", las_dir, ".las")
     print(f"Selected: {las_path}")
@@ -250,7 +250,11 @@ def main():
             appended_count += 1
 
     # 7. Save the modified CityJSON
-    output_filename = json_path.replace(".json", "_meshed.city.json")
+    output_dir = "outputs/16_final_LOD3_json"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    base_name = os.path.basename(json_path)
+    output_filename = os.path.join(output_dir, base_name.replace(".json", "_meshed.city.json"))
     print(f"\nSaving modified CityJSON to: {output_filename}")
     
     with open(output_filename, 'w', encoding='utf-8') as f:

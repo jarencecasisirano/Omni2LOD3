@@ -7,7 +7,7 @@ from io import BytesIO
 
 # --- CONFIGURATION ---
 API_KEY = "AIzaSyBQNmEhhsUlTaveWeICQQ0XWb038AisdQQ"
-SAVE_DIR = "data/google-street-view4/"
+SAVE_DIR = "data/Google_street_view/"
 
 # Ensure the save directory exists
 os.makedirs(SAVE_DIR, exist_ok=True)

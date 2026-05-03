@@ -2,10 +2,10 @@
 """
 merge_aligned_p2p.py — Merge aligned point clouds per subfolder
 
-For every subfolder in outputs/06_aligned_p2p/:
+For every subfolder in outputs/05_aligned_p2p/:
   - Loads all .las files within it
   - Concatenates their points (and colours if present)
-  - Saves the merged cloud to outputs/07_merged_las/<subfolder>.las
+  - Saves the merged cloud to outputs/06_merged_las/<subfolder>.las
 
 Usage
 -----
@@ -20,8 +20,8 @@ from pathlib import Path
 
 # ── paths ────────────────────────────────────────────────────────────────────
 BASE_DIR    = Path(__file__).resolve().parents[2]
-INPUT_BASE  = BASE_DIR / "outputs" / "06_aligned_p2p"
-OUTPUT_DIR  = BASE_DIR / "outputs" / "07_merged_las"
+INPUT_BASE  = BASE_DIR / "outputs" / "05_aligned_p2p"
+OUTPUT_DIR  = BASE_DIR / "outputs" / "06_merged_las"
 
 
 def merge_subfolder(subfolder: Path, output_dir: Path) -> bool:

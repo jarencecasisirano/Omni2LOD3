@@ -11,13 +11,13 @@ Usage:
     python scripts/LOD2toLOD3/07_label_clusters.py
 
 Workflow:
-    1. Select a point cloud from outputs/08_segmented
+    1. Select a point cloud from outputs/07_segmented
     2. The cloud opens in an Open3D window for visual reference
     3. For each color cluster the terminal shows:
          - A clear human-readable color name (e.g. "Bright Red", "Dark Green")
          - Its percentage of total points
        You type a label (Wall / Door / Window / Roof / Other)
-    4. The labelled cloud is saved to outputs/09_labelled
+    4. The labelled cloud is saved to outputs/08_labelled
 """
 
 import os
@@ -331,8 +331,8 @@ def save_labelled(las, labels, output_path):
 # Main
 # =====================================================================
 def main():
-    input_dir = "outputs/08_segmented"
-    output_dir = "outputs/09_labelled"
+    input_dir = "outputs/07_segmented"
+    output_dir = "outputs/08_labelled"
 
     # 1. Select file
     file_path = select_file(input_dir)

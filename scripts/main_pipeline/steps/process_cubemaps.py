@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from PIL import Image
-from rectify import render_face
+from utils.rectify import render_face
 
 FACES = ['pz', 'nz', 'px', 'nx', 'py', 'ny']
 

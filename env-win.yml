@@ -1,5 +1,7 @@
 name: las-env
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
@@ -56,17 +58,17 @@ dependencies:
   - ca-certificates=2026.1.4=h4c7d964_0
   - cairo=1.18.4=h5782bbf_0
   - capnproto=1.2.0=h3a793f1_0
-  - ceres-solver=2.2.0=gpugplhf6d55c2_309
+  - ceres-solver=2.2.0
   - certifi=2026.1.4=pyhd8ed1ab_0
   - charset-normalizer=3.4.4=pyhd8ed1ab_0
   - cli11=2.6.0=h5112557_0
   - click=8.3.1=pyha7b4d00_1
   - colorama=0.4.6=pyhd8ed1ab_1
   - contourpy=1.3.2=py310hc19bc0b_0
-  - cuda-cudart=12.9.79=he0c23c2_0
-  - cuda-cudart_win-64=12.9.79=he0c23c2_0
-  - cuda-nvrtc=12.9.86=hac47afa_1
-  - cuda-version=12.9=h4f385c5_3
+  - cuda-cudart=12.1
+  - cuda-cudart_win-64=12.1
+  - cuda-nvrtc=12.1
+  - cuda-version=12.1
   - cycler=0.12.1=pyhcf101f3_2
   - dash=3.3.0=pyhd8ed1ab_0
   - dav1d=1.2.1=hcfcfb64_0

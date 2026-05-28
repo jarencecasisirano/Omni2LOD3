@@ -3,167 +3,274 @@ import argparse
 
 from steps.downsampling import run as step01
 from steps.reclassify import run as step02
+
 from steps.merge_walls import run as step03
 from steps.process_cubemaps import process_images as step04
 
+from steps.glb_to_las import run as step05
+
 
 def run_pipeline(
-    input_las,
-    shp,
-    output_dir,
-    voxel_size=0.1,
-    cityjson_input=None,
-    image_input_dir=None,
+    input_las=None,
+    shp=None,
+    cityjson=None,
+    images=None,
+    glb_dir=None,
+    output_dir="outputs",
+    voxel_size=0.05,
+    normal_threshold=5.0,
+    distance_threshold=2.0,
+    ground_tolerance=0.5,
     yaw=0.0,
     pitch=0.0,
-    roll=0.0
+    roll=0.0,
+    glb_samples=1000000,
 ):
-
-    # -------------------------
-    # 1. VALIDATION
-    # -------------------------
-    if not input_las:
-        raise ValueError("input_las is required")
-
-    if not shp:
-        raise ValueError("shapefile is required")
-
-    if not output_dir:
-        raise ValueError("output_dir is required")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    print("\n==============================")
-    print("OMNI2LOD3 PIPELINE START")
-    print("==============================\n")
-
     results = {}
 
-    # =========================================================
-    # STEP 01: DOWNSAMPLING (LAS)
-    # =========================================================
-    print("STEP 01: Downsampling")
+    # ==================================================
+    # SECTION A — LiDAR PREPROCESSING
+    # ==================================================
 
-    ds_output = os.path.join(output_dir, "01_downsample.las")
+    run_section_a = input_las is not None or shp is not None
 
-    result1 = step01(
-        input_las=input_las,
-        output_las=ds_output,
-        voxel_size=voxel_size
-    )
+    if run_section_a:
 
-    if result1 is None or result1.get("output") is None:
-        raise RuntimeError("Step 01 failed: no output generated")
+        print("\n" + "=" * 80)
+        print("SECTION A — LiDAR Preprocessing")
+        print("=" * 80)
 
-    results["step01"] = result1
-    las_after_step1 = result1["output"]
+        # --------------------------------------------------
+        # STEP 01 + STEP 02 REQUIRE BOTH INPUTS
+        # --------------------------------------------------
 
-    # =========================================================
-    # STEP 02: RECLASSIFICATION (LAS)
-    # =========================================================
-    print("STEP 02: Reclassification")
+        if input_las is None:
+            raise ValueError("SECTION A requires --input")
 
-    rec_output = os.path.join(output_dir, "02_reclassified.las")
+        if shp is None:
+            raise ValueError("SECTION A requires --shp")
 
-    result2 = step02(
-        input_las=las_after_step1,
-        footprint_shp=shp,
-        output_las=rec_output
-    )
+        # --------------------------------------------------
+        # STEP 01 — DOWNSAMPLING
+        # --------------------------------------------------
 
-    results["step02"] = result2
-    las_after_step2 = result2["output"]
+        print("\nSTEP 01: Downsampling")
 
-    # =========================================================
-    # STEP 03: CITYJSON WALL MERGING (OPTIONAL)
-    # =========================================================
-    result3 = None
-    cityjson_output = None
+        ds_output = os.path.join(output_dir, "01_downsample.las")
 
-    if cityjson_input:
-        print("STEP 03: Merge Wall Surfaces (CityJSON)")
-
-        cityjson_output = os.path.join(output_dir, "03_merged.cityjson")
-
-        result3 = step03(
-            input_json=cityjson_input,
-            output_json=cityjson_output,
-            normal_threshold=5.0,
-            distance_threshold=2.0,
-            ground_tolerance=0.5
+        result1 = step01(
+            input_las=input_las, output_las=ds_output, voxel_size=voxel_size
         )
 
-    results["step03"] = result3
+        results["step01"] = result1
 
-    # =========================================================
-    # STEP 04: CUBEMAP PROCESSING (OPTIONAL, IMAGES)
-    # =========================================================
-    result4 = None
-    cubemap_output = None
+        # --------------------------------------------------
+        # STEP 02 — RECLASSIFICATION
+        # --------------------------------------------------
 
-    if image_input_dir:
-        print("STEP 04: Cubemap Processing")
+        print("\nSTEP 02: Reclassification")
+
+        rec_output = os.path.join(output_dir, "02_reclassified.las")
+
+        result2 = step02(
+            input_las=result1["output"], footprint_shp=shp, output_las=rec_output
+        )
+
+        results["step02"] = result2
+
+    else:
+
+        print("\nSkipping SECTION A")
+
+    # ==================================================
+    # SECTION B — CITYJSON
+    # ==================================================
+
+    run_section_b = cityjson is not None
+
+    if run_section_b:
+
+        print("\n" + "=" * 80)
+        print("SECTION B — CityJSON Processing")
+        print("=" * 80)
+
+        # --------------------------------------------------
+        # STEP 03 — WALL MERGING
+        # --------------------------------------------------
+
+        print("\nSTEP 03: Merge Wall Surfaces")
+
+        merged_output = os.path.join(output_dir, "03_merged.cityjson")
+
+        result3 = step03(
+            input_json=cityjson,
+            output_json=merged_output,
+            normal_threshold=normal_threshold,
+            distance_threshold=distance_threshold,
+            ground_tolerance=ground_tolerance,
+        )
+
+        results["step03"] = result3
+
+    else:
+
+        print("\nSkipping SECTION B")
+
+    # ==================================================
+    # SECTION C — OMNI IMAGE PROCESSING
+    # ==================================================
+
+    run_section_c = images is not None
+
+    if run_section_c:
+
+        print("\n" + "=" * 80)
+        print("SECTION C — Cubemap Generation")
+        print("=" * 80)
+
+        # --------------------------------------------------
+        # STEP 04 — CUBEMAPS
+        # --------------------------------------------------
+
+        print("\nSTEP 04: Cubemap Processing")
 
         cubemap_output = os.path.join(output_dir, "04_cubemaps")
 
-        result4 = step04(
-            input_dir=image_input_dir,
-            output_dir=cubemap_output,
-            yaw=yaw,
-            pitch=pitch,
-            roll=roll
+        os.makedirs(cubemap_output, exist_ok=True)
+
+        step04(
+            input_dir=images, output_dir=cubemap_output, yaw=yaw, pitch=pitch, roll=roll
         )
 
-    results["step04"] = result4
+        results["step04"] = {"output_dir": cubemap_output}
 
-    # =========================================================
+    else:
+
+        print("\nSkipping SECTION C")
+
+    # ==================================================
+    # SECTION D — GLB PROCESSING
+    # ==================================================
+
+    run_section_d = glb_dir is not None
+
+    if run_section_d:
+
+        print("\n" + "=" * 80)
+        print("SECTION D — GLB to LAS Conversion")
+        print("=" * 80)
+
+        # --------------------------------------------------
+        # STEP 05 — GLB TO LAS
+        # --------------------------------------------------
+
+        print("\nSTEP 05: GLB → LAS Conversion")
+
+        glb_output = os.path.join(output_dir, "05_glb_las")
+
+        result5 = step05(input_dir=glb_dir, output_dir=glb_output, samples=glb_samples)
+
+        results["step05"] = result5
+
+    else:
+
+        print("\nSkipping SECTION D")
+
+    # ==================================================
     # FINAL SUMMARY
-    # =========================================================
-    print("\n==============================")
-    print("PIPELINE DONE")
-    print("==============================\n")
+    # ==================================================
 
-    results["final_las"] = las_after_step2
-    results["final_cityjson"] = cityjson_output
-    results["final_cubemaps"] = cubemap_output
+    if not results:
+
+        print("\nNo sections were executed.")
+
+    else:
+
+        print("\n" + "=" * 80)
+        print("PIPELINE COMPLETE")
+        print("=" * 80)
+
+        print("\nExecuted Steps:")
+
+        for key in results.keys():
+            print(f"  ✓ {key}")
 
     return results
 
 
-# =========================================================
-# CLI ENTRY POINT
-# =========================================================
+# ======================================================
+# CLI ENTRY
+# ======================================================
+
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Omni2LOD3 Pipeline")
+    parser = argparse.ArgumentParser()
 
-    # LAS pipeline
-    parser.add_argument("--input", required=True, help="Input LAS file")
-    parser.add_argument("--shp", required=True, help="Footprint shapefile")
-    parser.add_argument("--output_dir", required=True, help="Output directory")
+    # --------------------------------------------------
+    # SECTION A — LIDAR
+    # --------------------------------------------------
+
+    parser.add_argument("--input")
+    parser.add_argument("--shp")
+
     parser.add_argument("--voxel", type=float, default=0.05)
 
-    # CityJSON (optional)
-    parser.add_argument("--cityjson", default=None)
+    # --------------------------------------------------
+    # SECTION B — CITYJSON
+    # --------------------------------------------------
 
-    # Images (optional)
-    parser.add_argument("--images", default=None)
+    parser.add_argument("--cityjson")
 
-    # Cubemap params
+    parser.add_argument("--normal_threshold", type=float, default=5.0)
+
+    parser.add_argument("--distance_threshold", type=float, default=2.0)
+
+    parser.add_argument("--ground_tolerance", type=float, default=0.5)
+
+    # --------------------------------------------------
+    # SECTION C — IMAGERY
+    # --------------------------------------------------
+
+    parser.add_argument("--images")
+
     parser.add_argument("--yaw", type=float, default=0.0)
+
     parser.add_argument("--pitch", type=float, default=0.0)
+
     parser.add_argument("--roll", type=float, default=0.0)
+
+    # --------------------------------------------------
+    # SECTION D — GLB
+    # --------------------------------------------------
+
+    parser.add_argument("--glb_dir")
+
+    parser.add_argument("--glb_samples", type=int, default=1000000)
+
+    # --------------------------------------------------
+    # OUTPUT
+    # --------------------------------------------------
+
+    parser.add_argument("--output_dir", default="outputs")
 
     args = parser.parse_args()
 
     run_pipeline(
         input_las=args.input,
         shp=args.shp,
+        cityjson=args.cityjson,
+        images=args.images,
+        glb_dir=args.glb_dir,
         output_dir=args.output_dir,
         voxel_size=args.voxel,
-        cityjson_input=args.cityjson,
-        image_input_dir=args.images,
+        normal_threshold=args.normal_threshold,
+        distance_threshold=args.distance_threshold,
+        ground_tolerance=args.ground_tolerance,
         yaw=args.yaw,
         pitch=args.pitch,
-        roll=args.roll
+        roll=args.roll,
+        glb_samples=args.glb_samples,
     )
